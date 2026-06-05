@@ -1,5 +1,8 @@
 # Changelog
 
+## [v0.25.1](https://github.com/sivchari/kumo/compare/v0.25.0...v0.25.1) - 2026-06-05
+- feat(readme): auto-generate Supported Services catalog from service metadata by @sivchari in https://github.com/sivchari/kumo/pull/801
+
 ## [v0.25.0](https://github.com/sivchari/kumo/compare/v0.24.1...v0.25.0) - 2026-06-04
 - feat(apigatewayv2): implement API Gateway v2 (HTTP API) CRUD by @sivchari in https://github.com/sivchari/kumo/pull/772
 - feat(apigateway): execute-api invoke for deployed stages (v1 + v2) by @sivchari in https://github.com/sivchari/kumo/pull/773
