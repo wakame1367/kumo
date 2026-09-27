@@ -29,11 +29,11 @@ func TestPublish_MessageAttributeValidation(t *testing.T) {
 	}{
 		{
 			name:  "invalid name",
-			attrs: map[string]MessageAttribute{"bad name!": {DataType: "String", StringValue: "v"}},
+			attrs: map[string]MessageAttribute{"bad name!": {DataType: dataTypeString, StringValue: "v"}},
 		},
 		{
 			name:  "empty name",
-			attrs: map[string]MessageAttribute{"": {DataType: "String", StringValue: "v"}},
+			attrs: map[string]MessageAttribute{"": {DataType: dataTypeString, StringValue: "v"}},
 		},
 		{
 			name:  "unsupported data type",
@@ -45,15 +45,15 @@ func TestPublish_MessageAttributeValidation(t *testing.T) {
 		},
 		{
 			name:  "empty string value",
-			attrs: map[string]MessageAttribute{"a": {DataType: "String"}},
+			attrs: map[string]MessageAttribute{"a": {DataType: dataTypeString}},
 		},
 		{
 			name:  "non-numeric number value",
-			attrs: map[string]MessageAttribute{"a": {DataType: "Number", StringValue: "abc"}},
+			attrs: map[string]MessageAttribute{"a": {DataType: dataTypeNumber, StringValue: "abc"}},
 		},
 		{
 			name:  "binary without binary value",
-			attrs: map[string]MessageAttribute{"a": {DataType: "Binary", StringValue: "v"}},
+			attrs: map[string]MessageAttribute{"a": {DataType: dataTypeBinary, StringValue: "v"}},
 		},
 		{
 			name:  "String.Array without a JSON array",
@@ -69,7 +69,7 @@ func TestPublish_MessageAttributeValidation(t *testing.T) {
 			topicARN := newPlainTopic(t, storage)
 
 			result, err := storage.Publish(ctx, topicARN, "hello", "", "", "", "", tc.attrs)
-			expectTopicErrorCode(t, err, errInvalidParameter)
+			expectTopicErrorCode(t, err)
 
 			if result != nil {
 				t.Errorf("Publish() result = %+v, want nil", result)
@@ -87,9 +87,9 @@ func TestPublish_MessageAttributeAcceptedTypes(t *testing.T) {
 		name  string
 		attrs map[string]MessageAttribute
 	}{
-		{name: "string", attrs: map[string]MessageAttribute{"a": {DataType: "String", StringValue: "v"}}},
-		{name: "number", attrs: map[string]MessageAttribute{"a": {DataType: "Number", StringValue: "12.5"}}},
-		{name: "binary", attrs: map[string]MessageAttribute{"a": {DataType: "Binary", BinaryValue: []byte{1, 2}}}},
+		{name: "string", attrs: map[string]MessageAttribute{"a": {DataType: dataTypeString, StringValue: "v"}}},
+		{name: "number", attrs: map[string]MessageAttribute{"a": {DataType: dataTypeNumber, StringValue: "12.5"}}},
+		{name: "binary", attrs: map[string]MessageAttribute{"a": {DataType: dataTypeBinary, BinaryValue: []byte{1, 2}}}},
 		{name: "custom string", attrs: map[string]MessageAttribute{"a": {DataType: "String.custom", StringValue: "v"}}},
 		{name: "string array", attrs: map[string]MessageAttribute{"a": {DataType: "String.Array", StringValue: `["x","y"]`}}},
 	}
@@ -121,7 +121,7 @@ func TestPublish_MessageTooLong(t *testing.T) {
 
 	// One byte over is rejected.
 	result, err := storage.Publish(context.Background(), topicARN, strings.Repeat("x", maxPublishMessageSize+1), "", "", "", "", nil)
-	expectTopicErrorCode(t, err, errInvalidParameter)
+	expectTopicErrorCode(t, err)
 
 	if result != nil {
 		t.Errorf("Publish() result = %+v, want nil", result)
@@ -129,8 +129,8 @@ func TestPublish_MessageTooLong(t *testing.T) {
 
 	// Attributes count toward the limit too.
 	result, err = storage.Publish(context.Background(), topicARN, "hello", "", "", "", "",
-		map[string]MessageAttribute{"big": {DataType: "String", StringValue: strings.Repeat("x", maxPublishMessageSize)}})
-	expectTopicErrorCode(t, err, errInvalidParameter)
+		map[string]MessageAttribute{"big": {DataType: dataTypeString, StringValue: strings.Repeat("x", maxPublishMessageSize)}})
+	expectTopicErrorCode(t, err)
 
 	if result != nil {
 		t.Errorf("Publish() result = %+v, want nil", result)

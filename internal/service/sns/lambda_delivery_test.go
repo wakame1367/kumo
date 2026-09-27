@@ -249,7 +249,7 @@ func TestPublish_LambdaFilterPolicyMismatchSkipsInvocation(t *testing.T) {
 	t.Parallel()
 
 	invoker := &capturingInvoker{}
-	storage, sub := newTopicWithLambdaSubscription(t, invoker, map[string]string{"FilterPolicy": `{"kind":["billing"]}`})
+	storage, sub := newTopicWithLambdaSubscription(t, invoker, map[string]string{subscriptionAttrFilterPolicy: `{"kind":["billing"]}`})
 
 	attributes := map[string]MessageAttribute{"kind": {DataType: dataTypeString, StringValue: "audit"}}
 	if _, err := storage.Publish(context.Background(), sub.TopicARN, testLambdaMessage, "", "", "", "", attributes); err != nil {

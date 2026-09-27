@@ -32,6 +32,9 @@ const maxEventEntrySize = 256 * 1024
 // long-running emulator session cannot grow it (and its allocations) forever.
 const maxDeliveredEvents = 1000
 
+// errCodeInvalidArgument is the per-entry PutEvents failure code.
+const errCodeInvalidArgument = "InvalidArgument"
+
 // Error codes.
 const (
 	errEventBusNotFound      = "ResourceNotFoundException"
@@ -719,11 +722,11 @@ func (s *MemoryStorage) PutEvents(_ context.Context, entries []PutEventsRequestE
 // ErrorCode/ErrorMessage for the failed entry, or "" when it is valid.
 func validatePutEventsEntry(entry *PutEventsRequestEntry) (string, string) {
 	if entry.Source == "" {
-		return "InvalidArgument", "Source is required"
+		return errCodeInvalidArgument, "Source is required"
 	}
 
 	if entry.DetailType == "" {
-		return "InvalidArgument", "DetailType is required"
+		return errCodeInvalidArgument, "DetailType is required"
 	}
 
 	if entry.Detail == "" || !json.Valid([]byte(entry.Detail)) {
@@ -731,7 +734,7 @@ func validatePutEventsEntry(entry *PutEventsRequestEntry) (string, string) {
 	}
 
 	if len(entry.Detail) > maxEventEntrySize {
-		return "InvalidArgument", "Detail is too large"
+		return errCodeInvalidArgument, "Detail is too large"
 	}
 
 	return "", ""

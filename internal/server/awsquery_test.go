@@ -10,6 +10,11 @@ import (
 	"testing"
 )
 
+const (
+	batchAttrDataTypeString = "String"
+	batchAttrStringValueKey = "StringValue"
+)
+
 func TestParseServiceFromUserAgent(t *testing.T) {
 	t.Parallel()
 
@@ -295,7 +300,7 @@ var formToJSONTests = []struct {
 			"PublishBatchRequestEntries.member.1.Id":                                          {"m1"},
 			"PublishBatchRequestEntries.member.1.Message":                                     {"hello"},
 			"PublishBatchRequestEntries.member.1.MessageAttributes.entry.1.Name":              {"kind"},
-			"PublishBatchRequestEntries.member.1.MessageAttributes.entry.1.Value.DataType":    {"String"},
+			"PublishBatchRequestEntries.member.1.MessageAttributes.entry.1.Value.DataType":    {batchAttrDataTypeString},
 			"PublishBatchRequestEntries.member.1.MessageAttributes.entry.1.Value.StringValue": {"42"},
 			"PublishBatchRequestEntries.member.2.Id":                                          {"m2"},
 			"PublishBatchRequestEntries.member.2.Message":                                     {"world"},
@@ -305,7 +310,7 @@ var formToJSONTests = []struct {
 				map[string]any{
 					"Id": "m1", "Message": "hello",
 					"MessageAttributes": map[string]any{
-						"kind": map[string]any{"DataType": "String", "StringValue": "42"},
+						"kind": map[string]any{"DataType": batchAttrDataTypeString, batchAttrStringValueKey: "42"},
 					},
 				},
 				map[string]any{"Id": "m2", "Message": "world"},
@@ -357,7 +362,7 @@ func TestFormToJSON_MessageAttributesKeepRawValues(t *testing.T) {
 		"MessageAttributes.entry.1.Value.DataType":    {"Number"},
 		"MessageAttributes.entry.1.Value.StringValue": {"007"},
 		"MessageAttributes.entry.2.Name":              {"flag"},
-		"MessageAttributes.entry.2.Value.DataType":    {"String"},
+		"MessageAttributes.entry.2.Value.DataType":    {batchAttrDataTypeString},
 		"MessageAttributes.entry.2.Value.StringValue": {"true"},
 		"MessageAttributes.entry.3.Name":              {"blob"},
 		"MessageAttributes.entry.3.Value.DataType":    {"Binary"},

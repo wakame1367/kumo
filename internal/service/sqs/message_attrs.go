@@ -105,7 +105,7 @@ func md5OfMessageAttributes(attrs map[string]MessageAttributeValue) string {
 	lenBuf := make([]byte, 4)
 
 	writeBytes := func(b []byte) {
-		binary.BigEndian.PutUint32(lenBuf, uint32(len(b)))
+		binary.BigEndian.PutUint32(lenBuf, uint32(len(b))) //nolint:gosec // SQS wire format uses 4-byte lengths
 		h.Write(lenBuf)
 		h.Write(b)
 	}
@@ -128,10 +128,14 @@ func md5OfMessageAttributes(attrs map[string]MessageAttributeValue) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
+// attrWildcardAll selects every attribute in the AttributeNames and
+// MessageAttributeNames filters.
+const attrWildcardAll = "All"
+
 // systemAttributeNames enumerates the message system attributes SQS returns
 // through ReceiveMessage's AttributeNames filter.
 var systemAttributeNames = map[string]bool{
-	"All":                              true,
+	attrWildcardAll:                    true,
 	"SenderId":                         true,
 	"SentTimestamp":                    true,
 	"ApproximateReceiveCount":          true,
@@ -178,7 +182,7 @@ func filterSystemAttributes(msg *Message, names []string) map[string]string {
 	all := messageSystemAttributes(msg)
 
 	for _, n := range names {
-		if n == "All" {
+		if n == attrWildcardAll {
 			return all
 		}
 	}
@@ -211,7 +215,7 @@ func filterMessageAttributes(msg *Message, names []string) map[string]MessageAtt
 	}
 
 	for _, n := range names {
-		if n == "All" || n == ".*" {
+		if n == attrWildcardAll || n == ".*" {
 			return msg.MessageAttributes
 		}
 	}

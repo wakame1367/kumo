@@ -40,7 +40,7 @@ func TestGetFunctionTagsSafeAgainstConcurrentTagWrites(t *testing.T) {
 
 	fn, err := storage.CreateFunction(ctx, &CreateFunctionRequest{
 		FunctionName: "race-fn",
-		Role:         "arn:aws:iam::000000000000:role/test-role",
+		Role:         testRoleARN,
 		Tags:         map[string]string{"seed": "value"},
 	})
 	if err != nil {

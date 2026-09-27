@@ -382,6 +382,8 @@ const publishBatchEntryPrefix = "PublishBatchRequestEntries.member."
 //
 // Entry members are sorted by their member index so the resulting map can be
 // attached to the matching element of the already-flattened entries list.
+//
+//nolint:cyclop,funlen // nested member/entry form decoding has inherently many branches
 func flattenPublishBatchEntryAttributes(data map[string]any) map[string]any {
 	pending := make(map[int]map[string]*messageAttributeEntry)
 	result := make(map[string]any)

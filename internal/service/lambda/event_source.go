@@ -251,7 +251,7 @@ type sqsEventRecord struct {
 	MessageAttributes map[string]sqsEventMessageAttr `json:"messageAttributes"`
 	MD5OfBody         string                         `json:"md5OfBody"`
 	EventSource       string                         `json:"eventSource"`
-	EventSourceARN    string                         `json:"eventSourceARN"`
+	EventSourceARN    string                         `json:"eventSourceARN"` //nolint:tagliatelle // AWS emits this exact field name
 	AWSRegion         string                         `json:"awsRegion"`
 	MD5OfMessageAttrs string                         `json:"md5OfMessageAttributes,omitempty"`
 }
@@ -311,5 +311,10 @@ func buildSQSEvent(messages []*SQSPollerMessage, queueARN string) ([]byte, error
 		}
 	}
 
-	return json.Marshal(map[string]any{"Records": records})
+	payload, err := json.Marshal(map[string]any{"Records": records})
+	if err != nil {
+		return nil, fmt.Errorf("marshal sqs event: %w", err)
+	}
+
+	return payload, nil
 }

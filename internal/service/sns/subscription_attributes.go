@@ -92,7 +92,7 @@ func (s *Service) SetSubscriptionAttributes(w http.ResponseWriter, r *http.Reque
 func buildSubscriptionAttributeView(sub *Subscription) map[string]string {
 	attrs := map[string]string{
 		"SubscriptionArn":              sub.ARN,
-		"TopicArn":                     sub.TopicARN,
+		snsFieldTopicArn:               sub.TopicARN,
 		"Protocol":                     sub.Protocol,
 		"Endpoint":                     sub.Endpoint,
 		"Owner":                        sub.Owner,

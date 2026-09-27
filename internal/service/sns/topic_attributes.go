@@ -254,9 +254,9 @@ func handleTopicError(w http.ResponseWriter, err error) {
 // AWS-managed defaults terraform-provider-aws expects to read after refresh.
 func buildTopicAttributeView(topic *Topic) map[string]string {
 	attrs := map[string]string{
-		"TopicArn":                topic.ARN,
+		snsFieldTopicArn:          topic.ARN,
 		"Owner":                   "000000000000",
-		"DisplayName":             topic.DisplayName,
+		topicAttrDisplayName:      topic.DisplayName,
 		"Policy":                  defaultTopicPolicy,
 		"SubscriptionsConfirmed":  "0",
 		"SubscriptionsPending":    "0",
@@ -271,9 +271,9 @@ func buildTopicAttributeView(topic *Topic) map[string]string {
 
 	// Always reflect the canonical fields back from the topic record, even
 	// if the user wrote a stale value into the attribute map.
-	attrs["TopicArn"] = topic.ARN
+	attrs[snsFieldTopicArn] = topic.ARN
 	if topic.DisplayName != "" {
-		attrs["DisplayName"] = topic.DisplayName
+		attrs[topicAttrDisplayName] = topic.DisplayName
 	}
 
 	return attrs

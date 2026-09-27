@@ -511,6 +511,8 @@ func (qd *QueueData) updateFIFOCache(dedupID, messageID string) {
 }
 
 // SendMessage sends a message to a queue.
+//
+//nolint:cyclop,funlen // sequential AWS-parity send validation
 func (s *MemoryStorage) SendMessage(_ context.Context, queueURL, body string, delaySeconds int, messageAttributes map[string]MessageAttributeValue, messageGroupID, messageDeduplicationID string) (*Message, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1099,6 +1101,8 @@ func (s *MemoryStorage) resolveQueueByARN(arn string) (*QueueData, error) {
 // to destinationARN, or — when no destination is given — back to the queue
 // that redrives into sourceARN. The move completes synchronously and the
 // resulting task is recorded for ListMessageMoveTasks/CancelMessageMoveTask.
+//
+//nolint:funlen // move-task bookkeeping follows AWS's task lifecycle
 func (s *MemoryStorage) StartMessageMoveTask(_ context.Context, sourceARN, destinationARN string, maxPerSecond int64) (*MessageMoveTask, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1204,6 +1208,7 @@ func (s *MemoryStorage) CancelMessageMoveTask(_ context.Context, taskHandle stri
 
 	if task.Status == "RUNNING" {
 		task.Status = "CANCELLING"
+
 		s.saveLocked()
 	}
 

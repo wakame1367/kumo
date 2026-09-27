@@ -5,6 +5,11 @@ import (
 	"testing"
 )
 
+const (
+	testDataTypeString = "String"
+	testDataTypeNumber = "Number"
+)
+
 func newTestQueue(t *testing.T, s *MemoryStorage, name string, attrs map[string]string) string {
 	t.Helper()
 
@@ -16,6 +21,7 @@ func newTestQueue(t *testing.T, s *MemoryStorage, name string, attrs map[string]
 	return q.URL
 }
 
+//nolint:funlen // table-driven validation cases
 func TestSendMessage_Validation(t *testing.T) {
 	t.Parallel()
 
@@ -40,17 +46,17 @@ func TestSendMessage_Validation(t *testing.T) {
 		{name: "at limit", body: strings.Repeat("x", 262144)},
 		{
 			name:    "oversize via attributes",
-			attrs:   map[string]MessageAttributeValue{"big": {DataType: "String", StringValue: strings.Repeat("x", 262144)}},
+			attrs:   map[string]MessageAttributeValue{"big": {DataType: testDataTypeString, StringValue: strings.Repeat("x", 262144)}},
 			wantErr: true,
 		},
 		{
 			name:    "invalid attribute name",
-			attrs:   map[string]MessageAttributeValue{"bad name": {DataType: "String", StringValue: "v"}},
+			attrs:   map[string]MessageAttributeValue{"bad name": {DataType: testDataTypeString, StringValue: "v"}},
 			wantErr: true,
 		},
 		{
 			name:    "reserved prefix",
-			attrs:   map[string]MessageAttributeValue{"AWS.trace": {DataType: "String", StringValue: "v"}},
+			attrs:   map[string]MessageAttributeValue{"AWS.trace": {DataType: testDataTypeString, StringValue: "v"}},
 			wantErr: true,
 		},
 		{
@@ -60,12 +66,12 @@ func TestSendMessage_Validation(t *testing.T) {
 		},
 		{
 			name:    "empty string value",
-			attrs:   map[string]MessageAttributeValue{"a": {DataType: "String"}},
+			attrs:   map[string]MessageAttributeValue{"a": {DataType: testDataTypeString}},
 			wantErr: true,
 		},
 		{
 			name:    "non-numeric number",
-			attrs:   map[string]MessageAttributeValue{"a": {DataType: "Number", StringValue: "xyz"}},
+			attrs:   map[string]MessageAttributeValue{"a": {DataType: testDataTypeNumber, StringValue: "xyz"}},
 			wantErr: true,
 		},
 		{
@@ -75,7 +81,7 @@ func TestSendMessage_Validation(t *testing.T) {
 		},
 		{
 			name:  "valid number",
-			attrs: map[string]MessageAttributeValue{"a": {DataType: "Number", StringValue: "3.14"}},
+			attrs: map[string]MessageAttributeValue{"a": {DataType: testDataTypeNumber, StringValue: "3.14"}},
 		},
 		{
 			name:  "custom type suffix",
@@ -117,9 +123,9 @@ func TestReceiveMessage_AttributeFiltering(t *testing.T) {
 	url := newTestQueue(t, s, "q", nil)
 
 	attrs := map[string]MessageAttributeValue{
-		"trace.id": {DataType: "String", StringValue: "abc"},
-		"count":    {DataType: "Number", StringValue: "5"},
-		"other":    {DataType: "String", StringValue: "x"},
+		"trace.id": {DataType: testDataTypeString, StringValue: "abc"},
+		"count":    {DataType: testDataTypeNumber, StringValue: "5"},
+		"other":    {DataType: testDataTypeString, StringValue: "x"},
 	}
 
 	msg, err := s.SendMessage(t.Context(), url, "body", 0, attrs, "", "")
@@ -175,12 +181,12 @@ func TestMD5OfMessageAttributes(t *testing.T) {
 	// Single String attribute "a"="v": digest must be stable and
 	// order-independent when more attributes are present.
 	d1 := md5OfMessageAttributes(map[string]MessageAttributeValue{
-		"b": {DataType: "String", StringValue: "2"},
-		"a": {DataType: "String", StringValue: "1"},
+		"b": {DataType: testDataTypeString, StringValue: "2"},
+		"a": {DataType: testDataTypeString, StringValue: "1"},
 	})
 	d2 := md5OfMessageAttributes(map[string]MessageAttributeValue{
-		"a": {DataType: "String", StringValue: "1"},
-		"b": {DataType: "String", StringValue: "2"},
+		"a": {DataType: testDataTypeString, StringValue: "1"},
+		"b": {DataType: testDataTypeString, StringValue: "2"},
 	})
 
 	if d1 == "" || d1 != d2 {
@@ -192,6 +198,7 @@ func TestMD5OfMessageAttributes(t *testing.T) {
 	}
 }
 
+//nolint:cyclop // sequential DLQ API exercise
 func TestDeadLetterSourceQueuesAndMoveTask(t *testing.T) {
 	t.Parallel()
 

@@ -16,7 +16,7 @@ import (
 // Literals shared across this file and pattern_test.go.
 const (
 	testEventSourceMyApp  = "my.app"
-	testEventSourceMyTest = "my.test"
+	testEventSourceMyTest = testEventSource
 	testDetailTypeOrder   = "OrderCreated"
 	testPathDetailNested  = "$.detail.nested"
 	testPathSource        = "$.source"
@@ -438,7 +438,7 @@ func TestPutEvents_APIDestinationCrossRegion(t *testing.T) {
 
 	conn, err := s.CreateConnection(ctx, &CreateConnectionRequest{
 		Name:              "test-conn",
-		AuthorizationType: "API_KEY",
+		AuthorizationType: testAuthAPIKey,
 		AuthParameters: AuthParameters{
 			APIKeyAuthParameters: &APIKeyAuthParameters{
 				APIKeyName:  "X-Api-Key",
@@ -474,21 +474,21 @@ func TestPutEvents_APIDestinationCrossRegion(t *testing.T) {
 	crossRegionTargetArn := "arn:aws:events:" + otherRegion + ":000000000000:api-destination/" + dest.Name
 
 	if _, err := s.PutRule(ctx, &PutRuleRequest{
-		Name:         "test-rule",
-		EventPattern: `{"source":["my.test"]}`,
+		Name:         testRuleName,
+		EventPattern: testSrcPattern,
 		State:        string(RuleStateEnabled),
 	}); err != nil {
 		t.Fatalf("PutRule: %v", err)
 	}
 
-	if _, err := s.PutTargets(ctx, "", "test-rule", []TargetInput{
+	if _, err := s.PutTargets(ctx, "", testRuleName, []TargetInput{
 		{ID: testTargetID1, Arn: crossRegionTargetArn},
 	}); err != nil {
 		t.Fatalf("PutTargets: %v", err)
 	}
 
 	if _, err := s.PutEvents(ctx, []PutEventsRequestEntry{
-		{Source: testEventSourceMyTest, DetailType: "TestEvent", Detail: `{"hello":"world"}`},
+		{Source: testEventSourceMyTest, DetailType: testDetailEvent, Detail: testHelloDetail},
 	}); err != nil {
 		t.Fatalf("PutEvents: %v", err)
 	}
@@ -535,7 +535,7 @@ func TestPutEvents_APIDestinationPathParameters(t *testing.T) {
 
 	conn, err := s.CreateConnection(ctx, &CreateConnectionRequest{
 		Name:              "test-conn",
-		AuthorizationType: "API_KEY",
+		AuthorizationType: testAuthAPIKey,
 		AuthParameters: AuthParameters{
 			APIKeyAuthParameters: &APIKeyAuthParameters{
 				APIKeyName:  "X-Api-Key",
@@ -558,14 +558,14 @@ func TestPutEvents_APIDestinationPathParameters(t *testing.T) {
 	}
 
 	if _, err := s.PutRule(ctx, &PutRuleRequest{
-		Name:         "test-rule",
-		EventPattern: `{"source":["my.test"]}`,
+		Name:         testRuleName,
+		EventPattern: testSrcPattern,
 		State:        string(RuleStateEnabled),
 	}); err != nil {
 		t.Fatalf("PutRule: %v", err)
 	}
 
-	if _, err := s.PutTargets(ctx, "", "test-rule", []TargetInput{
+	if _, err := s.PutTargets(ctx, "", testRuleName, []TargetInput{
 		{
 			ID:  testTargetID1,
 			Arn: dest.Arn,
@@ -581,7 +581,7 @@ func TestPutEvents_APIDestinationPathParameters(t *testing.T) {
 	}
 
 	if _, err := s.PutEvents(ctx, []PutEventsRequestEntry{
-		{Source: testEventSourceMyTest, DetailType: "TestEvent", Detail: `{"hello":"world"}`},
+		{Source: testEventSourceMyTest, DetailType: testDetailEvent, Detail: testHelloDetail},
 	}); err != nil {
 		t.Fatalf("PutEvents: %v", err)
 	}

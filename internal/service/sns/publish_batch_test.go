@@ -15,7 +15,7 @@ func doPublishBatch(t *testing.T, storage Storage, body string) (int, XMLPublish
 
 	svc := New(storage)
 
-	req := httptest.NewRequest("POST", "/", strings.NewReader(body))
+	req := httptest.NewRequestWithContext(t.Context(), "POST", "/", strings.NewReader(body))
 	req.Header.Set("X-Amz-Target", "AmazonSimpleNotificationService.PublishBatch")
 	req.Header.Set("Content-Type", "application/x-amz-json-1.0")
 
@@ -41,7 +41,7 @@ func TestPublishBatch_AllSucceed(t *testing.T) {
 	body, _ := json.Marshal(PublishBatchRequest{
 		TopicARN: topicARN,
 		PublishBatchRequestEntries: []PublishBatchRequestEntry{
-			{ID: "m1", Message: "hello"},
+			{ID: "m1", Message: testHelloMessage},
 			{ID: "m2", Message: "world", Subject: "s"},
 		},
 	})
@@ -104,7 +104,7 @@ func TestPublishBatch_RequestValidation(t *testing.T) {
 	storage := NewMemoryStorage("http://localhost:4566")
 	topicARN := newPlainTopic(t, storage)
 
-	entry := PublishBatchRequestEntry{ID: "m1", Message: "hello"}
+	entry := PublishBatchRequestEntry{ID: "m1", Message: testHelloMessage}
 
 	tests := []struct {
 		name    string
@@ -143,7 +143,7 @@ func TestPublishBatch_MissingTopicFailsRequest(t *testing.T) {
 	body, _ := json.Marshal(PublishBatchRequest{
 		TopicARN: "arn:aws:sns:us-east-1:000000000000:missing",
 		PublishBatchRequestEntries: []PublishBatchRequestEntry{
-			{ID: "m1", Message: "hello"},
+			{ID: "m1", Message: testHelloMessage},
 		},
 	})
 

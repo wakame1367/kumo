@@ -37,7 +37,7 @@ func (f *fakeSQSSource) ReceiveMessages(_ context.Context, _ string, _, _ int) (
 	return batch, nil
 }
 
-func (f *fakeSQSSource) DeleteMessage(_ context.Context, _ string, receiptHandle string) error {
+func (f *fakeSQSSource) DeleteMessage(_ context.Context, _, receiptHandle string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -48,6 +48,12 @@ func (f *fakeSQSSource) DeleteMessage(_ context.Context, _ string, receiptHandle
 
 var errFakePoll = errors.New("poll failed")
 
+const (
+	testRoleARN        = "arn:aws:iam::000000000000:role/test-role"
+	testMessageID1     = "m-1"
+	testReceiptHandle1 = "rh-1"
+)
+
 func newEventSourceTestService(t *testing.T, handler http.Handler) (*Service, *fakeSQSSource) {
 	t.Helper()
 
@@ -56,11 +62,12 @@ func newEventSourceTestService(t *testing.T, handler http.Handler) (*Service, *f
 
 	storage := NewMemoryStorage("http://localhost:4566")
 	svc := New(storage, "http://localhost:4566")
-	t.Cleanup(func() { svc.Close() })
+
+	t.Cleanup(func() { _ = svc.Close() })
 
 	_, err := storage.CreateFunction(t.Context(), &CreateFunctionRequest{
 		FunctionName:   "esm-fn",
-		Role:           "arn:aws:iam::000000000000:role/test-role",
+		Role:           testRoleARN,
 		InvokeEndpoint: server.URL,
 	})
 	if err != nil {
@@ -94,8 +101,8 @@ func TestSQSEventSourcePollerInvokesFunctionAndDeletesMessages(t *testing.T) {
 
 	source.messages = []*SQSPollerMessage{
 		{
-			MessageID:     "m-1",
-			ReceiptHandle: "rh-1",
+			MessageID:     testMessageID1,
+			ReceiptHandle: testReceiptHandle1,
 			Body:          `{"hello":"world"}`,
 			MD5OfBody:     "md5",
 			Attributes:    map[string]string{"SentTimestamp": "1700000000000"},
@@ -113,7 +120,7 @@ func TestSQSEventSourcePollerInvokesFunctionAndDeletesMessages(t *testing.T) {
 	}
 
 	var event struct {
-		Records []sqsEventRecord `json:"Records"`
+		Records []sqsEventRecord `json:"Records"` //nolint:tagliatelle // AWS field name
 	}
 
 	if err := json.Unmarshal([]byte(recorder.snapshot()[0]), &event); err != nil {
@@ -125,7 +132,7 @@ func TestSQSEventSourcePollerInvokesFunctionAndDeletesMessages(t *testing.T) {
 	}
 
 	rec := event.Records[0]
-	if rec.MessageID != "m-1" || rec.Body != `{"hello":"world"}` {
+	if rec.MessageID != testMessageID1 || rec.Body != `{"hello":"world"}` {
 		t.Errorf("unexpected record: %+v", rec)
 	}
 
@@ -156,7 +163,7 @@ func TestSQSEventSourcePollerDisabledByMapping(t *testing.T) {
 	recorder := &payloadRecorder{}
 	svc, source := newEventSourceTestService(t, recorder)
 
-	source.messages = []*SQSPollerMessage{{MessageID: "m-1", ReceiptHandle: "rh-1", Body: "x"}}
+	source.messages = []*SQSPollerMessage{{MessageID: testMessageID1, ReceiptHandle: testReceiptHandle1, Body: "x"}}
 
 	disabled := false
 
@@ -230,7 +237,7 @@ func TestSQSEventSourcePollerKeepsMessagesOnInvokeFailure(t *testing.T) {
 
 	svc, source := newEventSourceTestService(t, failing)
 
-	source.messages = []*SQSPollerMessage{{MessageID: "m-1", ReceiptHandle: "rh-1", Body: "x"}}
+	source.messages = []*SQSPollerMessage{{MessageID: testMessageID1, ReceiptHandle: testReceiptHandle1, Body: "x"}}
 
 	mapping := newMapping(t, svc, nil)
 

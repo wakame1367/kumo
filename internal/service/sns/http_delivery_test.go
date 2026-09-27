@@ -3,6 +3,7 @@ package sns
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -17,7 +18,7 @@ type recordingPoster struct {
 func (r *recordingPoster) PostJSON(_ context.Context, _ string, payload []byte) error {
 	var m map[string]any
 	if err := json.Unmarshal(payload, &m); err != nil {
-		return err
+		return fmt.Errorf("decode payload: %w", err)
 	}
 
 	r.mu.Lock()

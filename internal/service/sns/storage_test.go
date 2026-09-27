@@ -20,7 +20,7 @@ func TestCreateTopicRejectsDelimiterNames(t *testing.T) {
 			store := NewMemoryStorage("http://localhost:4566")
 
 			_, err := store.CreateTopic(t.Context(), name, nil, nil)
-			expectTopicErrorCode(t, err, "InvalidParameter")
+			expectTopicErrorCode(t, err)
 		})
 	}
 }
@@ -42,7 +42,7 @@ func TestCreateTopicAcceptsValidNames(t *testing.T) {
 	}
 
 	// A .fifo name is only valid together with the FifoTopic attribute.
-	topic, err := store.CreateTopic(t.Context(), "topic-name.fifo", map[string]string{"FifoTopic": "true"}, nil)
+	topic, err := store.CreateTopic(t.Context(), "topic-name.fifo", map[string]string{topicAttrFifoTopic: testAttrValueTrue}, nil)
 	if err != nil {
 		t.Fatalf("CreateTopic(fifo): %v", err)
 	}
@@ -52,8 +52,10 @@ func TestCreateTopicAcceptsValidNames(t *testing.T) {
 	}
 }
 
-func expectTopicErrorCode(t *testing.T, err error, code string) {
+func expectTopicErrorCode(t *testing.T, err error) {
 	t.Helper()
+
+	code := errInvalidParameter
 
 	var topicErr *TopicError
 	if !errors.As(err, &topicErr) {

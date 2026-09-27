@@ -10,6 +10,7 @@ import (
 
 const (
 	testAttrValueTrue = "true"
+	testHelloMessage  = "hello"
 	testTraceValueAbc = "abc"
 )
 
@@ -104,8 +105,8 @@ func TestPublish_RawDeliveryPreservesTypedAttributes(t *testing.T) {
 	storage, topicARN := newTopicWithSQSSubscription(t, publisher, map[string]string{subscriptionAttrRawMessageDelivery: testAttrValueTrue})
 
 	attributes := map[string]MessageAttribute{
-		"count": {DataType: "Number", StringValue: "42"},
-		"blob":  {DataType: "Binary", BinaryValue: []byte{1, 2}},
+		"count": {DataType: dataTypeNumber, StringValue: "42"},
+		"blob":  {DataType: dataTypeBinary, BinaryValue: []byte{1, 2}},
 	}
 
 	_, err := storage.Publish(context.Background(), topicARN, "hello", "", "", "", "", attributes)
@@ -118,7 +119,7 @@ func TestPublish_RawDeliveryPreservesTypedAttributes(t *testing.T) {
 		t.Fatalf("expected captured attrs to contain count, got %v", publisher.attrs)
 	}
 
-	if count.DataType != "Number" || count.StringValue != "42" {
+	if count.DataType != dataTypeNumber || count.StringValue != "42" {
 		t.Errorf("count attribute = %+v, want DataType=Number StringValue=42", count)
 	}
 
@@ -127,7 +128,7 @@ func TestPublish_RawDeliveryPreservesTypedAttributes(t *testing.T) {
 		t.Fatalf("expected captured attrs to contain blob, got %v", publisher.attrs)
 	}
 
-	if blob.DataType != "Binary" || !bytes.Equal(blob.BinaryValue, []byte{1, 2}) {
+	if blob.DataType != dataTypeBinary || !bytes.Equal(blob.BinaryValue, []byte{1, 2}) {
 		t.Errorf("blob attribute = %+v, want DataType=Binary BinaryValue=[1 2]", blob)
 	}
 }

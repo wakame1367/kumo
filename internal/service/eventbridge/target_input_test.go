@@ -12,20 +12,30 @@ import (
 	"time"
 )
 
-func newRuleWithTarget(t *testing.T, s *MemoryStorage, target TargetInput) {
+const (
+	testRuleName    = "test-rule"
+	testSrcPattern  = `{"source":["my.test"]}`
+	testAuthAPIKey  = "API_KEY"
+	testDetailEvent = "TestEvent"
+	testQueueARN    = "arn:aws:sqs:us-east-1:000000000000:q"
+	testEventSource = "my.test"
+	testHelloDetail = `{"hello":"world"}`
+)
+
+func newRuleWithTarget(t *testing.T, s *MemoryStorage, target *TargetInput) {
 	t.Helper()
 
 	ctx := context.Background()
 
 	if _, err := s.PutRule(ctx, &PutRuleRequest{
-		Name:         "test-rule",
-		EventPattern: `{"source":["my.test"]}`,
+		Name:         testRuleName,
+		EventPattern: testSrcPattern,
 		State:        string(RuleStateEnabled),
 	}); err != nil {
 		t.Fatalf("PutRule: %v", err)
 	}
 
-	failed, err := s.PutTargets(ctx, "", "test-rule", []TargetInput{target})
+	failed, err := s.PutTargets(ctx, "", testRuleName, []TargetInput{*target})
 	if err != nil {
 		t.Fatalf("PutTargets: %v", err)
 	}
@@ -37,6 +47,8 @@ func newRuleWithTarget(t *testing.T, s *MemoryStorage, target TargetInput) {
 
 // TestPutEvents_TargetInputConstant verifies that a target with Input set
 // receives the constant JSON verbatim instead of the event envelope.
+//
+//nolint:funlen // end-to-end delivery verification
 func TestPutEvents_TargetInputConstant(t *testing.T) {
 	t.Parallel()
 
@@ -45,6 +57,7 @@ func TestPutEvents_TargetInputConstant(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		received <- body
+
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer server.Close()
@@ -54,7 +67,7 @@ func TestPutEvents_TargetInputConstant(t *testing.T) {
 
 	conn, err := s.CreateConnection(ctx, &CreateConnectionRequest{
 		Name:              "c",
-		AuthorizationType: "API_KEY",
+		AuthorizationType: testAuthAPIKey,
 		AuthParameters: AuthParameters{
 			APIKeyAuthParameters: &APIKeyAuthParameters{APIKeyName: "k", APIKeyValue: "v"},
 		},
@@ -73,14 +86,14 @@ func TestPutEvents_TargetInputConstant(t *testing.T) {
 		t.Fatalf("CreateAPIDestination: %v", err)
 	}
 
-	newRuleWithTarget(t, s, TargetInput{
+	newRuleWithTarget(t, s, &TargetInput{
 		ID:    "t1",
 		Arn:   dest.Arn,
 		Input: `{"constant":"payload"}`,
 	})
 
 	if _, err := s.PutEvents(ctx, []PutEventsRequestEntry{
-		{Source: "my.test", DetailType: "TestEvent", Detail: `{"hello":"world"}`},
+		{Source: testEventSource, DetailType: testDetailEvent, Detail: testHelloDetail},
 	}); err != nil {
 		t.Fatalf("PutEvents: %v", err)
 	}
@@ -121,14 +134,14 @@ func TestPutTargets_InputValidation(t *testing.T) {
 		name   string
 		target TargetInput
 	}{
-		{"missing id", TargetInput{Arn: "arn:aws:sqs:us-east-1:000000000000:q"}},
+		{"missing id", TargetInput{Arn: testQueueARN}},
 		{"missing arn", TargetInput{ID: "t"}},
 		{"input plus inputpath", TargetInput{
-			ID: "t", Arn: "arn:aws:sqs:us-east-1:000000000000:q",
+			ID: "t", Arn: testQueueARN,
 			Input: `{}`, InputPath: "$.detail",
 		}},
 		{"input plus transformer", TargetInput{
-			ID: "t", Arn: "arn:aws:sqs:us-east-1:000000000000:q",
+			ID: "t", Arn: testQueueARN,
 			Input: `{}`,
 			InputTransformer: &InputTransformerInput{
 				InputPathsMap: map[string]string{"s": "$.source"},
@@ -136,10 +149,10 @@ func TestPutTargets_InputValidation(t *testing.T) {
 			},
 		}},
 		{"invalid input json", TargetInput{
-			ID: "t", Arn: "arn:aws:sqs:us-east-1:000000000000:q", Input: "not json",
+			ID: "t", Arn: testQueueARN, Input: "not json",
 		}},
 		{"empty input template", TargetInput{
-			ID: "t", Arn: "arn:aws:sqs:us-east-1:000000000000:q",
+			ID: "t", Arn: testQueueARN,
 			InputTransformer: &InputTransformerInput{InputPathsMap: map[string]string{"s": "$.source"}},
 		}},
 	}
@@ -226,6 +239,7 @@ func TestPutEvents_SNSTarget(t *testing.T) {
 		body, _ := io.ReadAll(r.Body)
 		form, _ := url.ParseQuery(string(body))
 		received <- form
+
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer server.Close()
@@ -233,13 +247,13 @@ func TestPutEvents_SNSTarget(t *testing.T) {
 	s := NewMemoryStorage(WithBaseURL(server.URL))
 	ctx := context.Background()
 
-	newRuleWithTarget(t, s, TargetInput{
+	newRuleWithTarget(t, s, &TargetInput{
 		ID:  "t1",
 		Arn: "arn:aws:sns:us-east-1:000000000000:topic1",
 	})
 
 	if _, err := s.PutEvents(ctx, []PutEventsRequestEntry{
-		{Source: "my.test", DetailType: "TestEvent", Detail: `{"hello":"world"}`},
+		{Source: testEventSource, DetailType: testDetailEvent, Detail: testHelloDetail},
 	}); err != nil {
 		t.Fatalf("PutEvents: %v", err)
 	}

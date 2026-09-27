@@ -15,7 +15,7 @@ func newEventInvokeConfigStorage(t *testing.T) *MemoryStorage {
 
 	_, err := storage.CreateFunction(t.Context(), &CreateFunctionRequest{
 		FunctionName: "eic-fn",
-		Role:         "arn:aws:iam::000000000000:role/test-role",
+		Role:         testRoleARN,
 	})
 	if err != nil {
 		t.Fatalf("CreateFunction: %v", err)
@@ -173,6 +173,7 @@ func TestAsyncDispatcherHonorsConfiguredRetries(t *testing.T) {
 	d := newTestDispatcher(t)
 
 	var attempts atomic.Int32
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		attempts.Add(1)
 		w.WriteHeader(http.StatusInternalServerError)
@@ -201,6 +202,7 @@ func TestAsyncDispatcherDefaultRetriesUnchanged(t *testing.T) {
 	d := newTestDispatcher(t)
 
 	var attempts atomic.Int32
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		attempts.Add(1)
 		w.WriteHeader(http.StatusInternalServerError)

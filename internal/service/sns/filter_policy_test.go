@@ -23,7 +23,7 @@ func TestEvaluateFilterPolicy_AttributeOperators(t *testing.T) {
 	attrs := map[string]MessageAttribute{
 		"store":  {DataType: dataTypeString, StringValue: "example-corp"},
 		"event":  {DataType: dataTypeString, StringValue: "order_cancelled"},
-		"price":  {DataType: "Number", StringValue: "150"},
+		"price":  {DataType: dataTypeNumber, StringValue: "150"},
 		"source": {DataType: dataTypeString, StringValue: "10.0.1.5"},
 	}
 
@@ -62,7 +62,7 @@ func TestEvaluateFilterPolicy_AttributeOperators(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			sub := subWithPolicy(map[string]string{"FilterPolicy": tc.policy})
+			sub := subWithPolicy(map[string]string{subscriptionAttrFilterPolicy: tc.policy})
 			if got := evaluateFilterPolicy(sub, "body", attrs); got != tc.want {
 				t.Errorf("evaluateFilterPolicy(%s) = %v, want %v", tc.policy, got, tc.want)
 			}
@@ -96,8 +96,8 @@ func TestEvaluateFilterPolicy_MessageBodyScope(t *testing.T) {
 			t.Parallel()
 
 			sub := subWithPolicy(map[string]string{
-				"FilterPolicy":      tc.policy,
-				"FilterPolicyScope": filterPolicyScopeBody,
+				subscriptionAttrFilterPolicy:      tc.policy,
+				subscriptionAttrFilterPolicyScope: filterPolicyScopeBody,
 			})
 			if got := evaluateFilterPolicy(sub, body, attrs); got != tc.want {
 				t.Errorf("evaluateFilterPolicy(%s) = %v, want %v", tc.policy, got, tc.want)
@@ -110,8 +110,8 @@ func TestEvaluateFilterPolicy_MessageBodyScopeNonJSON(t *testing.T) {
 	t.Parallel()
 
 	sub := subWithPolicy(map[string]string{
-		"FilterPolicy":      `{"event": ["x"]}`,
-		"FilterPolicyScope": filterPolicyScopeBody,
+		subscriptionAttrFilterPolicy:      `{"event": ["x"]}`,
+		subscriptionAttrFilterPolicyScope: filterPolicyScopeBody,
 	})
 
 	if evaluateFilterPolicy(sub, "not json", nil) {
@@ -134,13 +134,13 @@ func TestSubscribe_FilterPolicyValidation(t *testing.T) {
 
 	// Malformed FilterPolicy JSON is rejected.
 	if _, err := storage.Subscribe(ctx, topic.ARN, protocolSQS, endpoint,
-		map[string]string{"FilterPolicy": "not json"}); err == nil {
+		map[string]string{subscriptionAttrFilterPolicy: "not json"}); err == nil {
 		t.Error("Subscribe(invalid FilterPolicy) want error")
 	}
 
 	// Policy values that are not arrays or objects are rejected.
 	if _, err := storage.Subscribe(ctx, topic.ARN, protocolSQS, endpoint,
-		map[string]string{"FilterPolicy": `{"k": "v"}`}); err == nil {
+		map[string]string{subscriptionAttrFilterPolicy: `{"k": "v"}`}); err == nil {
 		t.Error("Subscribe(scalar FilterPolicy value) want error")
 	}
 
@@ -152,15 +152,15 @@ func TestSubscribe_FilterPolicyValidation(t *testing.T) {
 
 	// Invalid FilterPolicyScope is rejected.
 	if _, err := storage.Subscribe(ctx, topic.ARN, protocolSQS, endpoint,
-		map[string]string{"FilterPolicyScope": "Everything"}); err == nil {
+		map[string]string{subscriptionAttrFilterPolicyScope: "Everything"}); err == nil {
 		t.Error("Subscribe(invalid FilterPolicyScope) want error")
 	}
 
 	// A well-formed policy is accepted.
 	if _, err := storage.Subscribe(ctx, topic.ARN, protocolSQS, endpoint,
 		map[string]string{
-			"FilterPolicy":      `{"store": ["example"]}`,
-			"FilterPolicyScope": filterPolicyScopeBody,
+			subscriptionAttrFilterPolicy:      `{"store": ["example"]}`,
+			subscriptionAttrFilterPolicyScope: filterPolicyScopeBody,
 		}); err != nil {
 		t.Errorf("Subscribe(valid policy) error = %v", err)
 	}
@@ -182,7 +182,7 @@ func TestSetSubscriptionAttribute_FilterPolicyValidation(t *testing.T) {
 		t.Fatalf("Subscribe() error = %v", err)
 	}
 
-	if err := storage.SetSubscriptionAttribute(ctx, sub.ARN, "FilterPolicy", "not json"); err == nil {
+	if err := storage.SetSubscriptionAttribute(ctx, sub.ARN, subscriptionAttrFilterPolicy, "not json"); err == nil {
 		t.Error("SetSubscriptionAttribute(invalid FilterPolicy) want error")
 	}
 
@@ -190,7 +190,7 @@ func TestSetSubscriptionAttribute_FilterPolicyValidation(t *testing.T) {
 		t.Error("SetSubscriptionAttribute(unknown name) want error")
 	}
 
-	if err := storage.SetSubscriptionAttribute(ctx, sub.ARN, "FilterPolicy", `{"k": ["v"]}`); err != nil {
+	if err := storage.SetSubscriptionAttribute(ctx, sub.ARN, subscriptionAttrFilterPolicy, `{"k": ["v"]}`); err != nil {
 		t.Errorf("SetSubscriptionAttribute(valid) error = %v", err)
 	}
 }

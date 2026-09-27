@@ -29,9 +29,9 @@ func evaluateFilterPolicy(sub *Subscription, message string, attributes map[stri
 	scope := filterPolicyScopeAttributes
 
 	if sub.SubscriptionAttributes != nil {
-		policyJSON = sub.SubscriptionAttributes["FilterPolicy"]
+		policyJSON = sub.SubscriptionAttributes[subscriptionAttrFilterPolicy]
 
-		if s := sub.SubscriptionAttributes["FilterPolicyScope"]; s != "" {
+		if s := sub.SubscriptionAttributes[subscriptionAttrFilterPolicyScope]; s != "" {
 			scope = s
 		}
 	}
@@ -183,10 +183,13 @@ func bodyScalarString(v any) (string, bool) {
 
 // matchBodyOperator evaluates operator objects against a body field value,
 // where exists=false means the field is absent.
+//
+//nolint:gocognit,cyclop // each branch mirrors one AWS filter operator
 func matchBodyOperator(obj map[string]any, value any) bool {
 	exists := value != nil
 
 	var s string
+
 	if exists {
 		if str, ok := bodyScalarString(value); ok {
 			s = str
@@ -576,13 +579,13 @@ func validFilterPolicyValue(raw json.RawMessage) bool {
 // validSubscriptionAttributeNames enumerates the attribute names SNS accepts
 // on Subscribe and SetSubscriptionAttributes.
 var validSubscriptionAttributeNames = map[string]bool{
-	"DeliveryPolicy":      true,
-	"FilterPolicy":        true,
-	"FilterPolicyScope":   true,
-	"RawMessageDelivery":  true,
-	"RedrivePolicy":       true,
-	"ReplayPolicy":        true,
-	"SubscriptionRoleArn": true,
+	"DeliveryPolicy":                  true,
+	subscriptionAttrFilterPolicy:      true,
+	subscriptionAttrFilterPolicyScope: true,
+	"RawMessageDelivery":              true,
+	"RedrivePolicy":                   true,
+	"ReplayPolicy":                    true,
+	"SubscriptionRoleArn":             true,
 }
 
 // validateSubscriptionAttributes applies SNS's checks to the subscription
@@ -599,11 +602,11 @@ func validateSubscriptionAttributes(attributes map[string]string) error {
 		}
 
 		switch name {
-		case "FilterPolicy":
+		case subscriptionAttrFilterPolicy:
 			if err := validateFilterPolicy(value); err != nil {
 				return err
 			}
-		case "FilterPolicyScope":
+		case subscriptionAttrFilterPolicyScope:
 			if value != filterPolicyScopeAttributes && value != filterPolicyScopeBody {
 				return &TopicError{
 					Code:    errInvalidParameter,

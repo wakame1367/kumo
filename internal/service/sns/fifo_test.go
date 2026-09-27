@@ -13,7 +13,7 @@ func newFIFOTopic(t *testing.T, storage *MemoryStorage, attributes map[string]st
 		attributes = map[string]string{}
 	}
 
-	attributes["FifoTopic"] = "true"
+	attributes[topicAttrFifoTopic] = testAttrValueTrue
 
 	topic, err := storage.CreateTopic(context.Background(), "test.fifo", attributes, nil)
 	if err != nil {
@@ -35,12 +35,12 @@ func TestCreateTopic_FifoNameRequiresFifoAttribute(t *testing.T) {
 	}
 
 	// FifoTopic=true without a .fifo name.
-	if _, err := storage.CreateTopic(ctx, "name", map[string]string{"FifoTopic": "true"}, nil); err == nil {
+	if _, err := storage.CreateTopic(ctx, "name", map[string]string{topicAttrFifoTopic: testAttrValueTrue}, nil); err == nil {
 		t.Fatal("CreateTopic(FifoTopic without .fifo name) want error")
 	}
 
 	// A matching pair is accepted and marks the topic FIFO.
-	topic, err := storage.CreateTopic(ctx, "name.fifo", map[string]string{"FifoTopic": "true"}, nil)
+	topic, err := storage.CreateTopic(ctx, "name.fifo", map[string]string{topicAttrFifoTopic: testAttrValueTrue}, nil)
 	if err != nil {
 		t.Fatalf("CreateTopic() error = %v", err)
 	}
@@ -56,22 +56,22 @@ func TestCreateTopic_ExistingTopicWithDifferentAttributes(t *testing.T) {
 	storage := NewMemoryStorage("http://localhost:4566")
 	ctx := context.Background()
 
-	if _, err := storage.CreateTopic(ctx, "dup", map[string]string{"DisplayName": "a"}, nil); err != nil {
+	if _, err := storage.CreateTopic(ctx, "dup", map[string]string{topicAttrDisplayName: "a"}, nil); err != nil {
 		t.Fatalf("CreateTopic() error = %v", err)
 	}
 
 	// Same attributes: idempotent.
-	if _, err := storage.CreateTopic(ctx, "dup", map[string]string{"DisplayName": "a"}, nil); err != nil {
+	if _, err := storage.CreateTopic(ctx, "dup", map[string]string{topicAttrDisplayName: "a"}, nil); err != nil {
 		t.Fatalf("CreateTopic(same attrs) error = %v", err)
 	}
 
 	// Different attributes: rejected.
-	if _, err := storage.CreateTopic(ctx, "dup", map[string]string{"DisplayName": "b"}, nil); err == nil {
+	if _, err := storage.CreateTopic(ctx, "dup", map[string]string{topicAttrDisplayName: "b"}, nil); err == nil {
 		t.Fatal("CreateTopic(different attrs) want error")
 	}
 
 	// Different tags: rejected.
-	if _, err := storage.CreateTopic(ctx, "dup", map[string]string{"DisplayName": "a"}, []Tag{{Key: "k", Value: "v"}}); err == nil {
+	if _, err := storage.CreateTopic(ctx, "dup", map[string]string{topicAttrDisplayName: "a"}, []Tag{{Key: "k", Value: "v"}}); err == nil {
 		t.Fatal("CreateTopic(different tags) want error")
 	}
 }
@@ -83,7 +83,7 @@ func TestPublish_FifoTopicRequiresMessageGroupID(t *testing.T) {
 	topicARN := newFIFOTopic(t, storage, nil)
 
 	result, err := storage.Publish(context.Background(), topicARN, "hello", "", "", "", "dedup-1", nil)
-	expectTopicErrorCode(t, err, errInvalidParameter)
+	expectTopicErrorCode(t, err)
 
 	if result != nil {
 		t.Errorf("Publish() result = %+v, want nil", result)
@@ -98,7 +98,7 @@ func TestPublish_FifoTopicRequiresDeduplicationID(t *testing.T) {
 
 	// No ContentBasedDeduplication and no explicit ID: rejected.
 	result, err := storage.Publish(context.Background(), topicARN, "hello", "", "", "group-1", "", nil)
-	expectTopicErrorCode(t, err, errInvalidParameter)
+	expectTopicErrorCode(t, err)
 
 	if result != nil {
 		t.Errorf("Publish() result = %+v, want nil", result)
@@ -113,7 +113,7 @@ func TestPublish_FifoContentBasedDeduplication(t *testing.T) {
 	storage.SetSQSPublisher(publisher)
 
 	ctx := context.Background()
-	topicARN := newFIFOTopic(t, storage, map[string]string{"ContentBasedDeduplication": "true"})
+	topicARN := newFIFOTopic(t, storage, map[string]string{"ContentBasedDeduplication": testAttrValueTrue})
 
 	if _, err := storage.Subscribe(ctx, topicARN, protocolSQS, "arn:aws:sqs:us-east-1:000000000000:q.fifo", nil); err != nil {
 		t.Fatalf("Subscribe() error = %v", err)
@@ -202,7 +202,7 @@ func TestPublish_StandardTopicRejectsDeduplicationID(t *testing.T) {
 	}
 
 	result, err := storage.Publish(ctx, topic.ARN, "hello", "", "", "", "dedup-1", nil)
-	expectTopicErrorCode(t, err, errInvalidParameter)
+	expectTopicErrorCode(t, err)
 
 	if result != nil {
 		t.Errorf("Publish() result = %+v, want nil", result)

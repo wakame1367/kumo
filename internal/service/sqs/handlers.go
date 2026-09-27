@@ -704,7 +704,6 @@ func (s *Service) RemovePermission(w http.ResponseWriter, r *http.Request) {
 	writeJSONResponse(w, struct{}{})
 }
 
-// writeJSONResponse writes a JSON response with HTTP 200 OK.
 // ListDeadLetterSourceQueues handles the ListDeadLetterSourceQueues action.
 func (s *Service) ListDeadLetterSourceQueues(w http.ResponseWriter, r *http.Request) {
 	var req ListDeadLetterSourceQueuesRequest
