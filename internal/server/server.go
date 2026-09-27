@@ -114,6 +114,7 @@ func New(config Config) *Server {
 	wireS3toSQS(registry)
 	wireS3toLambda(registry)
 	wireSNStoLambda(registry)
+	wireLambdaToSQS(registry)
 	wireS3toSNS(registry)
 	wireCloudWatchToSNS(registry)
 

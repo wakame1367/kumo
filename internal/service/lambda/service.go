@@ -1,9 +1,11 @@
 package lambda
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
+	"sync"
 
 	"github.com/sivchari/kumo/internal/service"
 )
@@ -28,6 +30,13 @@ type Service struct {
 	baseURL string
 	broker  *runtimeBroker
 	async   *asyncDispatcher
+
+	// Event source mapping pollers: one cancelable goroutine per enabled
+	// SQS mapping, started by the Create/Update handlers and by
+	// SetSQSEventSource for restored mappings.
+	sqsSource  SQSEventSource
+	esmMu      sync.Mutex
+	esmCancels map[string]context.CancelFunc
 }
 
 // New creates a new Lambda service.
@@ -93,6 +102,7 @@ func (s *Service) RegisterRoutes(r service.Router) {
 // Close stops the async dispatcher and saves the storage state if
 // persistence is enabled.
 func (s *Service) Close() error {
+	s.stopAllEventSourcePollers()
 	s.async.close()
 
 	if c, ok := s.storage.(io.Closer); ok {

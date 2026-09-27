@@ -623,6 +623,8 @@ func (s *Service) CreateEventSourceMapping(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	s.syncEventSourcePoller(mapping)
+
 	writeJSONResponse(w, http.StatusCreated, mapping)
 }
 
@@ -660,6 +662,8 @@ func (s *Service) DeleteEventSourceMapping(w http.ResponseWriter, r *http.Reques
 
 		return
 	}
+
+	s.stopEventSourcePoller(mappingUUID)
 
 	if err := s.storage.DeleteEventSourceMapping(r.Context(), mappingUUID); err != nil {
 		handleFunctionError(w, err)
@@ -722,6 +726,8 @@ func (s *Service) UpdateEventSourceMapping(w http.ResponseWriter, r *http.Reques
 
 		return
 	}
+
+	s.syncEventSourcePoller(mapping)
 
 	writeJSONResponse(w, http.StatusOK, mapping)
 }
