@@ -193,9 +193,68 @@ func (s *Service) Subscribe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// SNS answers "pending confirmation" instead of the subscription ARN
+	// for protocols that still need ConfirmSubscription, unless the caller
+	// opted into the real ARN with ReturnSubscriptionArn.
+	subscriptionARN := subscription.ARN
+	if !subscription.Confirmed && !req.ReturnSubscriptionArn {
+		subscriptionARN = "pending confirmation"
+	}
+
 	writeXMLResponse(w, XMLSubscribeResponse{
 		Xmlns: snsXMLNS,
 		SubscribeResult: XMLSubscribeResult{
+			SubscriptionArn: subscriptionARN,
+		},
+		ResponseMetadata: ResponseMetadata{
+			RequestID: uuid.New().String(),
+		},
+	})
+}
+
+// ConfirmSubscription handles the ConfirmSubscription action.
+func (s *Service) ConfirmSubscription(w http.ResponseWriter, r *http.Request) {
+	var req ConfirmSubscriptionRequest
+	if err := service.ReadJSONRequest(r, &req); err != nil {
+		writeTopicError(w, errInvalidParameter, "Failed to parse request body", http.StatusBadRequest)
+
+		return
+	}
+
+	if req.TopicArn == "" {
+		writeTopicError(w, errInvalidParameter, "TopicArn is required", http.StatusBadRequest)
+
+		return
+	}
+
+	if req.Token == "" {
+		writeTopicError(w, errInvalidParameter, "Token is required", http.StatusBadRequest)
+
+		return
+	}
+
+	subscription, err := s.storage.ConfirmSubscription(r.Context(), req.TopicArn, req.Token)
+	if err != nil {
+		var sErr *TopicError
+		if errors.As(err, &sErr) {
+			status := http.StatusBadRequest
+			if sErr.Code == errNotFound {
+				status = http.StatusNotFound
+			}
+
+			writeTopicError(w, sErr.Code, sErr.Message, status)
+
+			return
+		}
+
+		writeTopicError(w, errInternalServiceError, "Internal server error", http.StatusInternalServerError)
+
+		return
+	}
+
+	writeXMLResponse(w, XMLConfirmSubscriptionResponse{
+		Xmlns: snsXMLNS,
+		ConfirmSubscriptionResult: XMLConfirmSubscriptionResult{
 			SubscriptionArn: subscription.ARN,
 		},
 		ResponseMetadata: ResponseMetadata{
@@ -536,6 +595,7 @@ func (s *Service) actionHandlers() map[string]func(http.ResponseWriter, *http.Re
 		"DeleteTopic":               s.DeleteTopic,
 		"ListTopics":                s.ListTopics,
 		"Subscribe":                 s.Subscribe,
+		"ConfirmSubscription":       s.ConfirmSubscription,
 		"Unsubscribe":               s.Unsubscribe,
 		"Publish":                   s.Publish,
 		"PublishBatch":              s.PublishBatch,

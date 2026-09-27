@@ -1,12 +1,14 @@
 package sns
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"sort"
 	"strings"
 	"sync"
@@ -55,6 +57,37 @@ type LambdaInvoker interface {
 	InvokeAsync(ctx context.Context, functionArn string, payload []byte) error
 }
 
+// HTTPPoster delivers an SNS envelope to an http/https subscription
+// endpoint, mirroring the POST SNS performs.
+type HTTPPoster interface {
+	PostJSON(ctx context.Context, url string, payload []byte) error
+}
+
+// defaultHTTPPoster posts the envelope the way SNS does: the JSON document
+// as the body with a text/plain content type.
+type defaultHTTPPoster struct {
+	client *http.Client
+}
+
+// PostJSON implements HTTPPoster.
+func (d defaultHTTPPoster) PostJSON(ctx context.Context, url string, payload []byte) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
+	if err != nil {
+		return fmt.Errorf("failed to build request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "text/plain; charset=UTF-8")
+
+	resp, err := d.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to POST: %w", err)
+	}
+
+	defer func() { _ = resp.Body.Close() }()
+
+	return nil
+}
+
 // Storage defines the SNS storage interface.
 type Storage interface {
 	CreateTopic(ctx context.Context, name string, attributes map[string]string, tags []Tag) (*Topic, error)
@@ -66,6 +99,7 @@ type Storage interface {
 	GetSubscription(ctx context.Context, subscriptionARN string) (*Subscription, error)
 	SetSubscriptionAttribute(ctx context.Context, subscriptionARN, name, value string) error
 	Unsubscribe(ctx context.Context, subscriptionARN string) error
+	ConfirmSubscription(ctx context.Context, topicARN, token string) (*Subscription, error)
 	Publish(ctx context.Context, topicARN, message, messageStructure, subject, messageGroupID, messageDeduplicationID string, attributes map[string]MessageAttribute) (*PublishResult, error)
 	ListSubscriptions(ctx context.Context, nextToken string) ([]*Subscription, string, error)
 	ListSubscriptionsByTopic(ctx context.Context, topicARN, nextToken string) ([]*Subscription, string, error)
@@ -112,6 +146,7 @@ type MemoryStorage struct {
 	baseURL       string
 	SqsPublisher  SQSPublisher `json:"-"`
 	lambdaInvoker LambdaInvoker
+	httpPoster    HTTPPoster
 	dataDir       string
 	// fifoDedup holds the per-topic deduplication window, keyed by topic
 	// ARN then by deduplication ID. Not persisted: like SQS's
@@ -127,6 +162,7 @@ func NewMemoryStorage(baseURL string, opts ...Option) *MemoryStorage {
 		Tags:          make(map[string][]Tag),
 		baseURL:       baseURL,
 		fifoDedup:     make(map[string]map[string]fifoDedupEntry),
+		httpPoster:    defaultHTTPPoster{client: &http.Client{Timeout: 15 * time.Second}},
 	}
 	for _, o := range opts {
 		o(s)
@@ -219,6 +255,13 @@ func (m *MemoryStorage) SetLambdaInvoker(invoker LambdaInvoker) {
 	m.lambdaInvoker = invoker
 }
 
+// SetHTTPPoster overrides the HTTP delivery used for http/https
+// subscriptions (and their SubscriptionConfirmation messages). Passing nil
+// disables HTTP delivery entirely.
+func (m *MemoryStorage) SetHTTPPoster(poster HTTPPoster) {
+	m.httpPoster = poster
+}
+
 // CreateTopic creates a new topic.
 //
 //nolint:funlen // sequential AWS parity checks for name/attributes/tags
@@ -228,7 +271,7 @@ func (m *MemoryStorage) CreateTopic(_ context.Context, name string, attributes m
 
 	if !isValidTopicName(name) {
 		return nil, &TopicError{
-			Code:    "InvalidParameter",
+			Code:    errInvalidParameter,
 			Message: "Topic name contains invalid characters",
 		}
 	}
@@ -292,7 +335,7 @@ func (m *MemoryStorage) CreateTopic(_ context.Context, name string, attributes m
 	}
 
 	if attributes != nil {
-		if displayName, ok := attributes["DisplayName"]; ok {
+		if displayName, ok := attributes[topicAttrDisplayName]; ok {
 			topic.DisplayName = displayName
 		}
 	}
@@ -525,7 +568,7 @@ func (m *MemoryStorage) Subscribe(_ context.Context, topicARN, protocol, endpoin
 
 	if !validProtocols[protocol] {
 		return nil, &TopicError{
-			Code:    "InvalidParameter",
+			Code:    errInvalidParameter,
 			Message: fmt.Sprintf("Invalid parameter: Protocol %s is not supported", protocol),
 		}
 	}
@@ -569,9 +612,13 @@ func (m *MemoryStorage) Subscribe(_ context.Context, topicARN, protocol, endpoin
 		SubscriptionAttributes: attributes,
 	}
 
-	// For SQS and Lambda protocols, auto-confirm.
+	// For SQS and Lambda protocols, auto-confirm. Other protocols stay
+	// pending until ConfirmSubscription is called with the issued token.
 	if protocol == protocolSQS || protocol == protocolLambda {
 		subscription.ConfirmationWasAuthenticated = true
+		subscription.Confirmed = true
+	} else {
+		subscription.ConfirmationToken = uuid.New().String()
 	}
 
 	m.Subscriptions[subscriptionARN] = subscription
@@ -579,7 +626,89 @@ func (m *MemoryStorage) Subscribe(_ context.Context, topicARN, protocol, endpoin
 
 	m.saveLocked()
 
+	if !subscription.Confirmed {
+		//nolint:gosec // the confirmation POST intentionally outlives the Subscribe request
+		go m.sendSubscriptionConfirmation(subscription)
+	}
+
 	return subscription, nil
+}
+
+// needsConfirmation reports whether the protocol requires the subscriber to
+// confirm the subscription before messages are delivered.
+func (s *Subscription) needsConfirmation() bool {
+	return !s.Confirmed
+}
+
+// sendSubscriptionConfirmation POSTs the SubscriptionConfirmation envelope
+// to an http/https endpoint, the way SNS does on Subscribe. Other pending
+// protocols (email, sms, ...) only get the pending state and token.
+func (m *MemoryStorage) sendSubscriptionConfirmation(sub *Subscription) {
+	if m.httpPoster == nil || (sub.Protocol != protocolHTTP && sub.Protocol != protocolHTTPS) {
+		return
+	}
+
+	if m.baseURL == "" {
+		return
+	}
+
+	subscribeURL := fmt.Sprintf("%s/?Action=ConfirmSubscription&TopicArn=%s&Token=%s",
+		m.baseURL, sub.TopicARN, sub.ConfirmationToken)
+
+	envelope := map[string]any{
+		"Type":             "SubscriptionConfirmation",
+		"MessageId":        uuid.New().String(),
+		"Token":            sub.ConfirmationToken,
+		snsFieldTopicArn:   sub.TopicARN,
+		"Message":          fmt.Sprintf("You have chosen to subscribe to the topic %s.\nTo confirm the subscription, visit the SubscribeURL included in this message.", sub.TopicARN),
+		"SubscribeURL":     subscribeURL,
+		"Timestamp":        time.Now().UTC().Format(time.RFC3339),
+		"SignatureVersion": "1",
+		"Signature":        snsPlaceholderSignature,
+		"SigningCertURL":   signingCertURLPlaceholder,
+	}
+
+	payload, err := json.Marshal(envelope)
+	if err != nil {
+		return
+	}
+
+	if err := m.httpPoster.PostJSON(context.Background(), sub.Endpoint, payload); err != nil {
+		slog.Debug("sns: subscription confirmation delivery failed",
+			"endpoint", sub.Endpoint, "error", err)
+	}
+}
+
+// ConfirmSubscription confirms a pending subscription by its token and
+// returns the subscription.
+func (m *MemoryStorage) ConfirmSubscription(_ context.Context, topicARN, token string) (*Subscription, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if _, exists := m.Topics[topicARN]; !exists {
+		return nil, &TopicError{
+			Code:    errNotFound,
+			Message: fmt.Sprintf("Topic does not exist: %s", topicARN),
+		}
+	}
+
+	for _, sub := range m.Subscriptions {
+		if sub.TopicARN != topicARN || sub.ConfirmationToken != token {
+			continue
+		}
+
+		sub.Confirmed = true
+		sub.ConfirmationWasAuthenticated = true
+
+		m.saveLocked()
+
+		return sub, nil
+	}
+
+	return nil, &TopicError{
+		Code:    errInvalidParameter,
+		Message: "Invalid parameter: Token",
+	}
 }
 
 // GetSubscription returns a subscription by ARN.
@@ -795,12 +924,28 @@ func (m *MemoryStorage) deliverMessage(ctx context.Context, sub *Subscription, m
 	case protocolLambda:
 		return m.deliverToLambda(ctx, sub, message, subject, messageID, attributes)
 	case protocolHTTP, protocolHTTPS:
-		// HTTP delivery not implemented in emulator.
-		return nil
+		return m.deliverToHTTP(ctx, sub, message, subject, messageID, attributes)
 	default:
 		// Other protocols not implemented.
 		return nil
 	}
+}
+
+// deliverToHTTP POSTs the SNS notification envelope to an http or https
+// subscription endpoint. Pending subscriptions receive nothing; SNS skips
+// them until ConfirmSubscription completes.
+func (m *MemoryStorage) deliverToHTTP(ctx context.Context, sub *Subscription, message, subject, messageID string, attributes map[string]MessageAttribute) error {
+	if sub.needsConfirmation() || m.httpPoster == nil {
+		return nil
+	}
+
+	payload := buildSNSNotificationEnvelope(sub.TopicARN, message, subject, messageID, attributes)
+
+	if err := m.httpPoster.PostJSON(ctx, sub.Endpoint, []byte(payload)); err != nil {
+		return fmt.Errorf("failed to POST to %s: %w", sub.Endpoint, err)
+	}
+
+	return nil
 }
 
 // deliverToSQS delivers a message to an sqs-protocol subscription. It
@@ -869,7 +1014,7 @@ func isRawMessageDelivery(sub *Subscription) bool {
 		return false
 	}
 
-	return sub.SubscriptionAttributes[subscriptionAttrRawMessageDelivery] == "true"
+	return sub.SubscriptionAttributes[subscriptionAttrRawMessageDelivery] == snsAttrValueTrue
 }
 
 // buildSNSNotificationEnvelope wraps a message in the SNS notification JSON
@@ -884,7 +1029,7 @@ func buildSNSNotificationEnvelope(topicARN, message, subject, messageID string, 
 		Message:          message,
 		Timestamp:        now,
 		SignatureVersion: "1",
-		Signature:        "EXAMPLE",
+		Signature:        snsPlaceholderSignature,
 		SigningCertURL:   signingCertURLPlaceholder,
 		UnsubscribeURL:   unsubscribeURL(topicARN),
 	}

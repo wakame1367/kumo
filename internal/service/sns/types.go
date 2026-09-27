@@ -38,6 +38,13 @@ type Subscription struct {
 	Owner                        string
 	ConfirmationWasAuthenticated bool
 	SubscriptionAttributes       map[string]string
+	// Confirmed reports whether the subscription completed the
+	// confirmation handshake. sqs/lambda subscriptions are confirmed
+	// immediately; the others stay pending until ConfirmSubscription.
+	Confirmed bool
+	// ConfirmationToken is the token issued for http(s)/email/sms
+	// subscriptions and validated by ConfirmSubscription.
+	ConfirmationToken string
 }
 
 // CreateTopicRequest is the request for CreateTopic.
@@ -85,6 +92,13 @@ type SubscribeRequest struct {
 // SubscribeResponse is the response for Subscribe.
 type SubscribeResponse struct {
 	SubscriptionARN string `json:"SubscriptionArn"`
+}
+
+// ConfirmSubscriptionRequest is the request for ConfirmSubscription.
+type ConfirmSubscriptionRequest struct {
+	TopicArn                  string `json:"TopicArn"`
+	Token                     string `json:"Token"`
+	AuthenticateOnUnsubscribe string `json:"AuthenticateOnUnsubscribe,omitempty"`
 }
 
 // UnsubscribeRequest is the request for Unsubscribe.
@@ -234,6 +248,19 @@ type XMLSubscribeResponse struct {
 
 // XMLSubscribeResult contains the Subscribe result.
 type XMLSubscribeResult struct {
+	SubscriptionArn string `xml:"SubscriptionArn"`
+}
+
+// XMLConfirmSubscriptionResponse is the XML response for ConfirmSubscription.
+type XMLConfirmSubscriptionResponse struct {
+	XMLName                   struct{}                     `xml:"ConfirmSubscriptionResponse"`
+	Xmlns                     string                       `xml:"xmlns,attr"`
+	ConfirmSubscriptionResult XMLConfirmSubscriptionResult `xml:"ConfirmSubscriptionResult"`
+	ResponseMetadata          ResponseMetadata             `xml:"ResponseMetadata"`
+}
+
+// XMLConfirmSubscriptionResult contains the ConfirmSubscription result.
+type XMLConfirmSubscriptionResult struct {
 	SubscriptionArn string `xml:"SubscriptionArn"`
 }
 

@@ -2,6 +2,7 @@ package sns
 
 import (
 	"net/http"
+	"strconv"
 
 	"github.com/google/uuid"
 
@@ -95,8 +96,8 @@ func buildSubscriptionAttributeView(sub *Subscription) map[string]string {
 		"Protocol":                     sub.Protocol,
 		"Endpoint":                     sub.Endpoint,
 		"Owner":                        sub.Owner,
-		"PendingConfirmation":          "false",
-		"ConfirmationWasAuthenticated": "true",
+		"PendingConfirmation":          strconv.FormatBool(!sub.Confirmed),
+		"ConfirmationWasAuthenticated": strconv.FormatBool(sub.ConfirmationWasAuthenticated),
 	}
 
 	for k, v := range sub.SubscriptionAttributes {

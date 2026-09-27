@@ -56,6 +56,7 @@ func (s *Service) Actions() []string {
 		"DeleteTopic",
 		"ListTopics",
 		"Subscribe",
+		"ConfirmSubscription",
 		"Unsubscribe",
 		"Publish",
 		"PublishBatch",
