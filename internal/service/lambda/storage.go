@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -40,7 +41,12 @@ type Storage interface {
 	// Read-only accessors
 	ListVersionsByFunction(ctx context.Context, functionName string) (*Function, error)
 	ListAliases(ctx context.Context, functionName string) error
-	ListFunctionEventInvokeConfigs(ctx context.Context, functionName string) error
+
+	// FunctionEventInvokeConfig operations
+	PutFunctionEventInvokeConfig(ctx context.Context, functionName string, req *functionEventInvokeConfigRequest) (*FunctionEventInvokeConfig, error)
+	GetFunctionEventInvokeConfig(ctx context.Context, functionName string) (*FunctionEventInvokeConfig, error)
+	DeleteFunctionEventInvokeConfig(ctx context.Context, functionName string) error
+	ListFunctionEventInvokeConfigs(ctx context.Context, functionName string) ([]*FunctionEventInvokeConfig, error)
 	GetFunctionCodeSigningConfig(ctx context.Context, functionName string) (string, error)
 
 	// EventSourceMapping operations
@@ -69,9 +75,10 @@ var (
 
 // MemoryStorage implements Storage with in-memory data.
 type MemoryStorage struct {
-	mu                  sync.RWMutex                   `json:"-"`
-	Functions           map[string]*Function           `json:"functions"`
-	EventSourceMappings map[string]*EventSourceMapping `json:"eventSourceMappings"`
+	mu                  sync.RWMutex                          `json:"-"`
+	Functions           map[string]*Function                  `json:"functions"`
+	EventSourceMappings map[string]*EventSourceMapping        `json:"eventSourceMappings"`
+	EventInvokeConfigs  map[string]*FunctionEventInvokeConfig `json:"eventInvokeConfigs"`
 	baseURL             string
 	region              string
 	accountID           string
@@ -88,6 +95,7 @@ func NewMemoryStorage(baseURL string, opts ...Option) *MemoryStorage {
 	s := &MemoryStorage{
 		Functions:           make(map[string]*Function),
 		EventSourceMappings: make(map[string]*EventSourceMapping),
+		EventInvokeConfigs:  make(map[string]*FunctionEventInvokeConfig),
 		baseURL:             baseURL,
 		region:              region,
 		accountID:           "000000000000",
@@ -280,6 +288,7 @@ func (s *MemoryStorage) DeleteFunction(_ context.Context, name string) error {
 	}
 
 	delete(s.Functions, name)
+	delete(s.EventInvokeConfigs, name)
 
 	s.saveLocked()
 
@@ -643,15 +652,154 @@ func (s *MemoryStorage) ListAliases(_ context.Context, functionName string) erro
 	return nil
 }
 
-// ListFunctionEventInvokeConfigs validates the function exists for event invoke config listing.
-func (s *MemoryStorage) ListFunctionEventInvokeConfigs(_ context.Context, functionName string) error {
+// PutFunctionEventInvokeConfig creates or replaces the asynchronous
+// invocation configuration of a function.
+func (s *MemoryStorage) PutFunctionEventInvokeConfig(_ context.Context, functionName string, req *functionEventInvokeConfigRequest) (*FunctionEventInvokeConfig, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	fn, exists := s.Functions[functionName]
+	if !exists {
+		return nil, &FunctionError{
+			Type:    ErrResourceNotFound,
+			Message: fmt.Sprintf("Function not found: %s", functionName),
+		}
+	}
+
+	if req.MaximumRetryAttempts != nil && (*req.MaximumRetryAttempts < 0 || *req.MaximumRetryAttempts > 2) {
+		return nil, &FunctionError{
+			Type:    ErrInvalidParameterValue,
+			Message: "MaximumRetryAttempts must be between 0 and 2",
+		}
+	}
+
+	if req.MaximumEventAgeInSeconds != nil && (*req.MaximumEventAgeInSeconds < 60 || *req.MaximumEventAgeInSeconds > 21600) {
+		return nil, &FunctionError{
+			Type:    ErrInvalidParameterValue,
+			Message: "MaximumEventAgeInSeconds must be between 60 and 21600",
+		}
+	}
+
+	if err := validateDestinationConfig(req.DestinationConfig); err != nil {
+		return nil, err
+	}
+
+	if s.EventInvokeConfigs == nil {
+		s.EventInvokeConfigs = make(map[string]*FunctionEventInvokeConfig)
+	}
+
+	config := &FunctionEventInvokeConfig{
+		FunctionArn:              fn.FunctionArn,
+		LastModified:             toUnixTimestamp(time.Now().UTC()),
+		MaximumRetryAttempts:     req.MaximumRetryAttempts,
+		MaximumEventAgeInSeconds: req.MaximumEventAgeInSeconds,
+		DestinationConfig:        req.DestinationConfig,
+	}
+
+	s.EventInvokeConfigs[functionName] = config
+
+	s.saveLocked()
+
+	return config, nil
+}
+
+// GetFunctionEventInvokeConfig returns the configured asynchronous
+// invocation config, or the AWS defaults (2 retries, 6 hour event age)
+// when none was ever set.
+func (s *MemoryStorage) GetFunctionEventInvokeConfig(_ context.Context, functionName string) (*FunctionEventInvokeConfig, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+
+	fn, exists := s.Functions[functionName]
+	if !exists {
+		return nil, &FunctionError{
+			Type:    ErrResourceNotFound,
+			Message: fmt.Sprintf("Function not found: %s", functionName),
+		}
+	}
+
+	if config, ok := s.EventInvokeConfigs[functionName]; ok {
+		return config, nil
+	}
+
+	defaultRetries := 2
+	defaultEventAge := 21600
+
+	return &FunctionEventInvokeConfig{
+		FunctionArn:              fn.FunctionArn,
+		MaximumRetryAttempts:     &defaultRetries,
+		MaximumEventAgeInSeconds: &defaultEventAge,
+	}, nil
+}
+
+// DeleteFunctionEventInvokeConfig removes the configured asynchronous
+// invocation config, restoring the AWS defaults.
+func (s *MemoryStorage) DeleteFunctionEventInvokeConfig(_ context.Context, functionName string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	if _, exists := s.Functions[functionName]; !exists {
 		return &FunctionError{
 			Type:    ErrResourceNotFound,
 			Message: fmt.Sprintf("Function not found: %s", functionName),
+		}
+	}
+
+	delete(s.EventInvokeConfigs, functionName)
+
+	s.saveLocked()
+
+	return nil
+}
+
+// ListFunctionEventInvokeConfigs returns the explicitly configured
+// asynchronous invocation configs of a function (empty when only the
+// implicit defaults apply).
+func (s *MemoryStorage) ListFunctionEventInvokeConfigs(_ context.Context, functionName string) ([]*FunctionEventInvokeConfig, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if _, exists := s.Functions[functionName]; !exists {
+		return nil, &FunctionError{
+			Type:    ErrResourceNotFound,
+			Message: fmt.Sprintf("Function not found: %s", functionName),
+		}
+	}
+
+	if config, ok := s.EventInvokeConfigs[functionName]; ok {
+		return []*FunctionEventInvokeConfig{config}, nil
+	}
+
+	return nil, nil
+}
+
+// validateDestinationConfig checks destination ARNs against the services
+// AWS allows as asynchronous invocation destinations.
+func validateDestinationConfig(dc *DestinationConfig) error {
+	if dc == nil {
+		return nil
+	}
+
+	for _, d := range []*EventInvokeDestination{dc.OnSuccess, dc.OnFailure} {
+		if d == nil {
+			continue
+		}
+
+		parts := strings.SplitN(d.Destination, ":", 4)
+		if len(parts) < 4 || parts[0] != "arn" {
+			return &FunctionError{
+				Type:    ErrInvalidParameterValue,
+				Message: fmt.Sprintf("Invalid destination ARN: %s", d.Destination),
+			}
+		}
+
+		switch parts[2] {
+		case "sns", "sqs", "lambda", "events":
+		default:
+			return &FunctionError{
+				Type:    ErrInvalidParameterValue,
+				Message: fmt.Sprintf("Destination service not supported: %s", parts[2]),
+			}
 		}
 	}
 

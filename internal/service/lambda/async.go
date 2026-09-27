@@ -60,6 +60,12 @@ type asyncDispatcher struct {
 	maxBackoff     time.Duration
 	maxEventAge    time.Duration
 
+	// invokeConfigOf resolves the function's stored
+	// FunctionEventInvokeConfig so its MaximumRetryAttempts and
+	// MaximumEventAgeInSeconds override the AWS defaults. Nil until the
+	// service wires storage in; a nil result means the defaults apply.
+	invokeConfigOf func(string) *FunctionEventInvokeConfig
+
 	mu     sync.Mutex
 	queues map[string]chan *asyncEvent
 	gates  map[string]invokeGate
@@ -131,10 +137,15 @@ func (d *asyncDispatcher) enqueue(functionName string, deliverer asyncDeliverer,
 	payloadCopy := make([]byte, len(payload))
 	copy(payloadCopy, payload)
 
+	maxAge := d.maxEventAge
+	if cfg := d.invokeConfig(functionName); cfg != nil && cfg.MaximumEventAgeInSeconds != nil {
+		maxAge = time.Duration(*cfg.MaximumEventAgeInSeconds) * time.Second
+	}
+
 	ev := &asyncEvent{
 		deliverer: deliverer,
 		payload:   payloadCopy,
-		deadline:  time.Now().Add(d.maxEventAge),
+		deadline:  time.Now().Add(maxAge),
 	}
 
 	d.mu.Lock()
@@ -155,6 +166,16 @@ func (d *asyncDispatcher) enqueue(functionName string, deliverer asyncDeliverer,
 	default:
 		slog.Error("async invoke queue full, event dropped", "function", functionName)
 	}
+}
+
+// invokeConfig looks up the function's FunctionEventInvokeConfig through
+// the resolver the service installed, or nil when none applies.
+func (d *asyncDispatcher) invokeConfig(functionName string) *FunctionEventInvokeConfig {
+	if d.invokeConfigOf == nil {
+		return nil
+	}
+
+	return d.invokeConfigOf(functionName)
 }
 
 // close stops all drain goroutines and waits for them to exit. In-flight
@@ -213,12 +234,17 @@ func (d *asyncDispatcher) deliver(ctx context.Context, functionName string, ev *
 	backoff := d.initialBackoff
 	functionErrorRetries := 0
 
+	maxRetries := asyncMaxFunctionErrorRetries
+	if cfg := d.invokeConfig(functionName); cfg != nil && cfg.MaximumRetryAttempts != nil {
+		maxRetries = *cfg.MaximumRetryAttempts
+	}
+
 	for {
 		switch ev.deliverer.deliver(ctx, functionName, ev.payload) {
 		case asyncDelivered, asyncPermanentFailure:
 			return
 		case asyncFunctionError:
-			if functionErrorRetries >= asyncMaxFunctionErrorRetries {
+			if functionErrorRetries >= maxRetries {
 				slog.Error("async invoke dropped after function error retries",
 					"function", functionName, "retries", functionErrorRetries)
 

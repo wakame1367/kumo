@@ -834,7 +834,74 @@ func (s *Service) GetFunctionCodeSigningConfig(w http.ResponseWriter, r *http.Re
 	writeJSONResponse(w, http.StatusOK, getFunctionCodeSigningConfigResponse{FunctionName: functionName})
 }
 
-// ListFunctionEventInvokeConfigs returns an empty list.
+// PutFunctionEventInvokeConfig creates or replaces a function's
+// asynchronous invocation configuration.
+func (s *Service) PutFunctionEventInvokeConfig(w http.ResponseWriter, r *http.Request) {
+	name := extractFunctionNameFromSubresource(r.URL.Path, "event-invoke-config")
+	if name == "" {
+		writeFunctionError(w, ErrInvalidParameterValue, "FunctionName is required", http.StatusBadRequest)
+
+		return
+	}
+
+	var req functionEventInvokeConfigRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeFunctionError(w, ErrInvalidParameterValue, "Invalid request body", http.StatusBadRequest)
+
+		return
+	}
+
+	config, err := s.storage.PutFunctionEventInvokeConfig(r.Context(), name, &req)
+	if err != nil {
+		handleFunctionError(w, err)
+
+		return
+	}
+
+	writeJSONResponse(w, http.StatusOK, config)
+}
+
+// GetFunctionEventInvokeConfig returns a function's asynchronous invocation
+// configuration (AWS defaults when none was configured).
+func (s *Service) GetFunctionEventInvokeConfig(w http.ResponseWriter, r *http.Request) {
+	name := extractFunctionNameFromSubresource(r.URL.Path, "event-invoke-config")
+	if name == "" {
+		writeFunctionError(w, ErrInvalidParameterValue, "FunctionName is required", http.StatusBadRequest)
+
+		return
+	}
+
+	config, err := s.storage.GetFunctionEventInvokeConfig(r.Context(), name)
+	if err != nil {
+		handleFunctionError(w, err)
+
+		return
+	}
+
+	writeJSONResponse(w, http.StatusOK, config)
+}
+
+// DeleteFunctionEventInvokeConfig resets a function's asynchronous
+// invocation configuration to the AWS defaults.
+func (s *Service) DeleteFunctionEventInvokeConfig(w http.ResponseWriter, r *http.Request) {
+	name := extractFunctionNameFromSubresource(r.URL.Path, "event-invoke-config")
+	if name == "" {
+		writeFunctionError(w, ErrInvalidParameterValue, "FunctionName is required", http.StatusBadRequest)
+
+		return
+	}
+
+	if err := s.storage.DeleteFunctionEventInvokeConfig(r.Context(), name); err != nil {
+		handleFunctionError(w, err)
+
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// ListFunctionEventInvokeConfigs returns a function's configured
+// asynchronous invocation configs.
 func (s *Service) ListFunctionEventInvokeConfigs(w http.ResponseWriter, r *http.Request) {
 	name := extractFunctionNameForListChild(r.URL.Path, "event-invoke-config")
 	if name == "" {
@@ -843,14 +910,19 @@ func (s *Service) ListFunctionEventInvokeConfigs(w http.ResponseWriter, r *http.
 		return
 	}
 
-	if err := s.storage.ListFunctionEventInvokeConfigs(r.Context(), name); err != nil {
+	configs, err := s.storage.ListFunctionEventInvokeConfigs(r.Context(), name)
+	if err != nil {
 		handleFunctionError(w, err)
 
 		return
 	}
 
+	if configs == nil {
+		configs = []*FunctionEventInvokeConfig{}
+	}
+
 	writeJSONResponse(w, http.StatusOK, listFunctionEventInvokeConfigsResponse{
-		FunctionEventInvokeConfigs: []map[string]any{},
+		FunctionEventInvokeConfigs: configs,
 	})
 }
 

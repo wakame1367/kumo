@@ -282,7 +282,38 @@ type getFunctionCodeSigningConfigResponse struct {
 
 // listFunctionEventInvokeConfigsResponse mirrors AWS's response.
 type listFunctionEventInvokeConfigsResponse struct {
-	FunctionEventInvokeConfigs []map[string]any `json:"FunctionEventInvokeConfigs"`
+	FunctionEventInvokeConfigs []*FunctionEventInvokeConfig `json:"FunctionEventInvokeConfigs"`
+}
+
+// FunctionEventInvokeConfig mirrors AWS's asynchronous invocation
+// configuration for a function (Put/Get/DeleteFunctionEventInvokeConfig).
+type FunctionEventInvokeConfig struct {
+	FunctionArn              string             `json:"FunctionArn"`
+	LastModified             float64            `json:"LastModified"`
+	MaximumRetryAttempts     *int               `json:"MaximumRetryAttempts,omitempty"`
+	MaximumEventAgeInSeconds *int               `json:"MaximumEventAgeInSeconds,omitempty"`
+	DestinationConfig        *DestinationConfig `json:"DestinationConfig,omitempty"`
+}
+
+// DestinationConfig holds the OnSuccess/OnFailure destinations of an
+// asynchronous invocation.
+type DestinationConfig struct {
+	OnSuccess *EventInvokeDestination `json:"OnSuccess,omitempty"`
+	OnFailure *EventInvokeDestination `json:"OnFailure,omitempty"`
+}
+
+// EventInvokeDestination is one destination ARN in a DestinationConfig.
+type EventInvokeDestination struct {
+	Destination string `json:"Destination"`
+}
+
+// functionEventInvokeConfigRequest is the body of PutFunctionEventInvokeConfig
+// and UpdateFunctionEventInvokeConfig.
+type functionEventInvokeConfigRequest struct {
+	FunctionName             string             `json:"FunctionName"`
+	MaximumRetryAttempts     *int               `json:"MaximumRetryAttempts"`
+	MaximumEventAgeInSeconds *int               `json:"MaximumEventAgeInSeconds"`
+	DestinationConfig        *DestinationConfig `json:"DestinationConfig"`
 }
 
 // addPermissionRequest is the request body for AddPermission.
