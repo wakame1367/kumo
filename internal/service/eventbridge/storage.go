@@ -21,6 +21,13 @@ import (
 // Default event bus name.
 const defaultEventBusName = "default"
 
+// maxPutEventsEntries is the AWS limit on PutEvents entries per call.
+const maxPutEventsEntries = 10
+
+// maxEventEntrySize is the AWS 256 KiB cap on a single PutEvents entry
+// (approximated by the Detail size, which dominates).
+const maxEventEntrySize = 256 * 1024
+
 // maxDeliveredEvents bounds the kumo-specific delivery-verification log so a
 // long-running emulator session cannot grow it (and its allocations) forever.
 const maxDeliveredEvents = 1000
@@ -471,6 +478,47 @@ func (s *MemoryStorage) ListRules(_ context.Context, eventBusName, namePrefix st
 	return result, "", nil
 }
 
+// validateTargetInput checks one PutTargets entry the way AWS does:
+// required fields, the Input/InputPath/InputTransformer mutual
+// exclusivity, and that a constant Input is valid JSON. Failures come
+// back as per-entry FailedEntries rather than failing the whole call.
+func validateTargetInput(t *TargetInput) *ServiceError {
+	if t.ID == "" {
+		return &ServiceError{Code: errInvalidParameter, Message: "Target Id is required"}
+	}
+
+	if t.Arn == "" {
+		return &ServiceError{Code: errInvalidParameter, Message: "Target Arn is required"}
+	}
+
+	specified := 0
+	if t.Input != "" {
+		specified++
+	}
+
+	if t.InputPath != "" {
+		specified++
+	}
+
+	if t.InputTransformer != nil {
+		specified++
+
+		if t.InputTransformer.InputTemplate == "" {
+			return &ServiceError{Code: errInvalidParameter, Message: "InputTemplate is required for InputTransformer"}
+		}
+	}
+
+	if specified > 1 {
+		return &ServiceError{Code: errInvalidParameter, Message: "Only one of Input, InputPath and InputTransformer can be specified"}
+	}
+
+	if t.Input != "" && !json.Valid([]byte(t.Input)) {
+		return &ServiceError{Code: errInvalidParameter, Message: "Input is not a valid JSON"}
+	}
+
+	return nil
+}
+
 // convertTargetInput converts a TargetInput to a Target.
 func convertTargetInput(t *TargetInput) *Target {
 	target := &Target{
@@ -519,6 +567,16 @@ func (s *MemoryStorage) PutTargets(_ context.Context, eventBusName, ruleName str
 	var failedEntries []PutTargetsResultEntry
 
 	for _, t := range targets {
+		if err := validateTargetInput(&t); err != nil {
+			failedEntries = append(failedEntries, PutTargetsResultEntry{
+				TargetID:     t.ID,
+				ErrorCode:    err.Code,
+				ErrorMessage: err.Message,
+			})
+
+			continue
+		}
+
 		target := convertTargetInput(&t)
 
 		// Find and update existing target or add new one.
@@ -616,16 +674,38 @@ func (s *MemoryStorage) PutEvents(_ context.Context, entries []PutEventsRequestE
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if len(entries) > maxPutEventsEntries {
+		return nil, &ServiceError{
+			Code:    errInvalidParameter,
+			Message: "Member must have length less than or equal to 10",
+		}
+	}
+
 	results := make([]PutEventsResultEntry, len(entries))
 
 	for i, entry := range entries {
-		eventID := uuid.New().String()
-		results[i] = PutEventsResultEntry{EventID: eventID}
+		if errCode, errMsg := validatePutEventsEntry(&entry); errCode != "" {
+			results[i] = PutEventsResultEntry{ErrorCode: errCode, ErrorMessage: errMsg}
+
+			continue
+		}
 
 		eventBusName := entry.EventBusName
 		if eventBusName == "" {
 			eventBusName = defaultEventBusName
 		}
+
+		if _, exists := s.EventBuses[eventBusName]; !exists {
+			results[i] = PutEventsResultEntry{
+				ErrorCode:    errEventBusNotFound,
+				ErrorMessage: "Event bus " + eventBusName + " does not exist",
+			}
+
+			continue
+		}
+
+		eventID := uuid.New().String()
+		results[i] = PutEventsResultEntry{EventID: eventID}
 
 		s.matchAndDeliver(eventID, eventBusName, &entry)
 	}
@@ -633,6 +713,28 @@ func (s *MemoryStorage) PutEvents(_ context.Context, entries []PutEventsRequestE
 	s.saveLocked()
 
 	return results, nil
+}
+
+// validatePutEventsEntry checks one PutEvents entry and returns the AWS
+// ErrorCode/ErrorMessage for the failed entry, or "" when it is valid.
+func validatePutEventsEntry(entry *PutEventsRequestEntry) (string, string) {
+	if entry.Source == "" {
+		return "InvalidArgument", "Source is required"
+	}
+
+	if entry.DetailType == "" {
+		return "InvalidArgument", "DetailType is required"
+	}
+
+	if entry.Detail == "" || !json.Valid([]byte(entry.Detail)) {
+		return "MalformedDetail", "Detail is malformed."
+	}
+
+	if len(entry.Detail) > maxEventEntrySize {
+		return "InvalidArgument", "Detail is too large"
+	}
+
+	return "", ""
 }
 
 // matchAndDeliver matches an event against rules, records deliveries, and performs HTTP delivery for API destinations. Must be called under lock.
@@ -685,6 +787,10 @@ func (s *MemoryStorage) matchAndDeliver(eventID, eventBusName string, entry *Put
 			if isLambdaArn(target.Arn) {
 				go s.deliverToLambda(target, payload)
 			}
+
+			if isSNSArn(target.Arn) {
+				go s.deliverToSNS(target, payload)
+			}
 		}
 
 		s.trimDeliveredEventsLocked()
@@ -721,6 +827,12 @@ func (s *MemoryStorage) buildEventPayload(eventID, eventBusName string, target *
 		s.logger.Error("failed to marshal event payload", "error", err)
 
 		return nil
+	}
+
+	// A constant Input replaces the event entirely; Input, InputPath and
+	// InputTransformer are mutually exclusive (enforced by PutTargets).
+	if target.Input != "" {
+		return []byte(target.Input)
 	}
 
 	if target.InputTransformer != nil {
@@ -935,6 +1047,51 @@ func (s *MemoryStorage) deliverToSQS(target *Target, payload []byte) {
 
 	s.logger.Info("delivered event to SQS",
 		"queue", queueName,
+		"status", resp.StatusCode,
+	)
+}
+
+// isSNSArn returns true if the ARN is an SNS topic ARN.
+func isSNSArn(arn string) bool {
+	return strings.Contains(arn, ":sns:")
+}
+
+// deliverToSNS publishes an event to an SNS topic via the local kumo SNS
+// endpoint (Query protocol: form-encoded Action=Publish).
+func (s *MemoryStorage) deliverToSNS(target *Target, payload []byte) {
+	if payload == nil {
+		return
+	}
+
+	form := url.Values{
+		"Action":   {"Publish"},
+		"TopicArn": {target.Arn},
+		"Message":  {string(payload)},
+	}
+
+	req, err := http.NewRequestWithContext(s.deliveryCtx, http.MethodPost, s.baseURL+"/", strings.NewReader(form.Encode()))
+	if err != nil {
+		s.logger.Error("failed to create SNS request", "error", err, "topic", target.Arn)
+
+		return
+	}
+
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	// The query dispatcher resolves services from the User-Agent token
+	// "api/<identifier>" when an action name is shared across services.
+	req.Header.Set("User-Agent", "kumo-events api/sns#2010-03-31")
+
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		s.logger.Error("failed to deliver event to SNS", "error", err, "topic", target.Arn)
+
+		return
+	}
+
+	defer func() { _ = resp.Body.Close() }()
+
+	s.logger.Info("delivered event to SNS",
+		"topic", target.Arn,
 		"status", resp.StatusCode,
 	)
 }

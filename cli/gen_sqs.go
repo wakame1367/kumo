@@ -21,6 +21,7 @@ func newSQSCmd() *cobra.Command {
 
 	cmd.AddCommand(
 		newSQSAddPermissionCmd(),
+		newSQSCancelMessageMoveTaskCmd(),
 		newSQSChangeMessageVisibilityCmd(),
 		newSQSChangeMessageVisibilityBatchCmd(),
 		newSQSCreateQueueCmd(),
@@ -29,6 +30,8 @@ func newSQSCmd() *cobra.Command {
 		newSQSDeleteQueueCmd(),
 		newSQSGetQueueAttributesCmd(),
 		newSQSGetQueueUrlCmd(),
+		newSQSListDeadLetterSourceQueuesCmd(),
+		newSQSListMessageMoveTasksCmd(),
 		newSQSListQueueTagsCmd(),
 		newSQSListQueuesCmd(),
 		newSQSPurgeQueueCmd(),
@@ -37,6 +40,7 @@ func newSQSCmd() *cobra.Command {
 		newSQSSendMessageCmd(),
 		newSQSSendMessageBatchCmd(),
 		newSQSSetQueueAttributesCmd(),
+		newSQSStartMessageMoveTaskCmd(),
 		newSQSTagQueueCmd(),
 		newSQSUntagQueueCmd(),
 	)
@@ -97,6 +101,48 @@ func newSQSAddPermissionCmd() *cobra.Command {
 	cmd.Flags().StringVar(&label, "label", "", "Label")
 
 	cmd.Flags().StringVar(&queueUrl, "queue-url", "", "Queue url")
+
+	cmd.Flags().String("region", "", "Region override (ignored)")
+
+	return cmd
+}
+
+func newSQSCancelMessageMoveTaskCmd() *cobra.Command {
+	var taskHandle string
+
+	cmd := &cobra.Command{
+		Use:   "cancel-message-move-task",
+		Short: "CancelMessageMoveTask",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cfg, err := newAWSConfig(cmd.Context())
+			if err != nil {
+				return err
+			}
+
+			client := sqs.NewFromConfig(cfg, func(o *sqs.Options) {
+				o.BaseEndpoint = aws.String(endpointURL)
+			})
+
+			input := &sqs.CancelMessageMoveTaskInput{}
+
+			if taskHandle != "" {
+				input.TaskHandle = aws.String(taskHandle)
+			}
+
+			out, err := client.CancelMessageMoveTask(cmd.Context(), input)
+			if err != nil {
+				return fmt.Errorf("cancel-message-move-task failed: %w", err)
+			}
+
+			if err := writeOutput(out); err != nil {
+				return err
+			}
+
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&taskHandle, "task-handle", "", "Task handle")
 
 	cmd.Flags().String("region", "", "Region override (ignored)")
 
@@ -496,6 +542,111 @@ func newSQSGetQueueUrlCmd() *cobra.Command {
 	cmd.Flags().StringVar(&queueName, "queue-name", "", "Queue name")
 
 	cmd.Flags().StringVar(&queueOwnerAWSAccountId, "queue-owner-aws-account-id", "", "Queue owner aws account id")
+
+	cmd.Flags().String("region", "", "Region override (ignored)")
+
+	return cmd
+}
+
+func newSQSListDeadLetterSourceQueuesCmd() *cobra.Command {
+	var queueUrl string
+	var maxResults int32
+	var nextToken string
+
+	cmd := &cobra.Command{
+		Use:   "list-dead-letter-source-queues",
+		Short: "ListDeadLetterSourceQueues",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cfg, err := newAWSConfig(cmd.Context())
+			if err != nil {
+				return err
+			}
+
+			client := sqs.NewFromConfig(cfg, func(o *sqs.Options) {
+				o.BaseEndpoint = aws.String(endpointURL)
+			})
+
+			input := &sqs.ListDeadLetterSourceQueuesInput{}
+
+			if queueUrl != "" {
+				input.QueueUrl = aws.String(queueUrl)
+			}
+
+			if maxResults != 0 {
+				input.MaxResults = aws.Int32(maxResults)
+			}
+
+			if nextToken != "" {
+				input.NextToken = aws.String(nextToken)
+			}
+
+			out, err := client.ListDeadLetterSourceQueues(cmd.Context(), input)
+			if err != nil {
+				return fmt.Errorf("list-dead-letter-source-queues failed: %w", err)
+			}
+
+			if err := writeOutput(out); err != nil {
+				return err
+			}
+
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&queueUrl, "queue-url", "", "Queue url")
+
+	cmd.Flags().Int32Var(&maxResults, "max-results", 0, "Max results")
+
+	cmd.Flags().StringVar(&nextToken, "next-token", "", "Next token")
+
+	cmd.Flags().String("region", "", "Region override (ignored)")
+
+	return cmd
+}
+
+func newSQSListMessageMoveTasksCmd() *cobra.Command {
+	var sourceArn string
+	var maxResults int32
+
+	cmd := &cobra.Command{
+		Use:   "list-message-move-tasks",
+		Short: "ListMessageMoveTasks",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cfg, err := newAWSConfig(cmd.Context())
+			if err != nil {
+				return err
+			}
+
+			client := sqs.NewFromConfig(cfg, func(o *sqs.Options) {
+				o.BaseEndpoint = aws.String(endpointURL)
+			})
+
+			input := &sqs.ListMessageMoveTasksInput{}
+
+			if sourceArn != "" {
+				input.SourceArn = aws.String(sourceArn)
+			}
+
+			if maxResults != 0 {
+				input.MaxResults = aws.Int32(maxResults)
+			}
+
+			out, err := client.ListMessageMoveTasks(cmd.Context(), input)
+			if err != nil {
+				return fmt.Errorf("list-message-move-tasks failed: %w", err)
+			}
+
+			if err := writeOutput(out); err != nil {
+				return err
+			}
+
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&sourceArn, "source-arn", "", "Source arn")
+
+	cmd.Flags().Int32Var(&maxResults, "max-results", 0, "Max results")
 
 	cmd.Flags().String("region", "", "Region override (ignored)")
 
@@ -954,6 +1105,62 @@ func newSQSSetQueueAttributesCmd() *cobra.Command {
 	cmd.Flags().StringVar(&attributes, "attributes", "", "Attributes (JSON)")
 
 	cmd.Flags().StringVar(&queueUrl, "queue-url", "", "Queue url")
+
+	cmd.Flags().String("region", "", "Region override (ignored)")
+
+	return cmd
+}
+
+func newSQSStartMessageMoveTaskCmd() *cobra.Command {
+	var sourceArn string
+	var destinationArn string
+	var maxNumberOfMessagesPerSecond int32
+
+	cmd := &cobra.Command{
+		Use:   "start-message-move-task",
+		Short: "StartMessageMoveTask",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cfg, err := newAWSConfig(cmd.Context())
+			if err != nil {
+				return err
+			}
+
+			client := sqs.NewFromConfig(cfg, func(o *sqs.Options) {
+				o.BaseEndpoint = aws.String(endpointURL)
+			})
+
+			input := &sqs.StartMessageMoveTaskInput{}
+
+			if sourceArn != "" {
+				input.SourceArn = aws.String(sourceArn)
+			}
+
+			if destinationArn != "" {
+				input.DestinationArn = aws.String(destinationArn)
+			}
+
+			if maxNumberOfMessagesPerSecond != 0 {
+				input.MaxNumberOfMessagesPerSecond = aws.Int32(maxNumberOfMessagesPerSecond)
+			}
+
+			out, err := client.StartMessageMoveTask(cmd.Context(), input)
+			if err != nil {
+				return fmt.Errorf("start-message-move-task failed: %w", err)
+			}
+
+			if err := writeOutput(out); err != nil {
+				return err
+			}
+
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&sourceArn, "source-arn", "", "Source arn")
+
+	cmd.Flags().StringVar(&destinationArn, "destination-arn", "", "Destination arn")
+
+	cmd.Flags().Int32Var(&maxNumberOfMessagesPerSecond, "max-number-of-messages-per-second", 0, "Max number of messages per second")
 
 	cmd.Flags().String("region", "", "Region override (ignored)")
 
