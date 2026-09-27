@@ -366,7 +366,6 @@ func (s *Service) Publish(w http.ResponseWriter, r *http.Request) {
 // PublishBatch handles the PublishBatch action.
 //
 //nolint:funlen // batch entry validation mirrors AWS's per-entry checks
-//nolint:funlen // batch entry validation mirrors AWS's per-entry checks
 func (s *Service) PublishBatch(w http.ResponseWriter, r *http.Request) {
 	var req PublishBatchRequest
 	if err := service.ReadJSONRequest(r, &req); err != nil {
