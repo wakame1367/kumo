@@ -547,6 +547,10 @@ func (m *MemoryStorage) Subscribe(_ context.Context, topicARN, protocol, endpoin
 		}
 	}
 
+	if err := validateSubscriptionAttributes(attributes); err != nil {
+		return nil, err
+	}
+
 	subscriptionARN := m.buildSubscriptionARN(topicARN)
 
 	if endpoint == "" {
@@ -605,6 +609,10 @@ func (m *MemoryStorage) SetSubscriptionAttribute(_ context.Context, subscription
 			Code:    errNotFound,
 			Message: fmt.Sprintf("Subscription does not exist: %s", subscriptionARN),
 		}
+	}
+
+	if err := validateSubscriptionAttributes(map[string]string{name: value}); err != nil {
+		return err
 	}
 
 	if subscription.SubscriptionAttributes == nil {
@@ -772,184 +780,14 @@ func (m *MemoryStorage) Publish(ctx context.Context, topicARN, message, messageS
 	return &PublishResult{MessageID: messageID, SequenceNumber: sequenceNumber}, nil
 }
 
-// matchesFilterPolicy checks whether the given message attributes satisfy the
-// subscription's FilterPolicy.  A FilterPolicy is a JSON object whose keys
-// are attribute names and whose values are arrays of allowed values.
-//
-// AWS supports several filter policy operators (exact match, prefix,
-// anything-but, numeric, exists, etc.).  This implementation covers:
-//   - exact string match  (e.g. ["billing"])
-//   - "exists": true/false
-//   - "prefix"
-//   - "anything-but"  (string list)
-//
-// If the subscription has no FilterPolicy, all messages match.
-func matchesFilterPolicy(filterPolicyJSON string, attributes map[string]MessageAttribute) bool {
-	if filterPolicyJSON == "" {
-		return true
-	}
-
-	var policy map[string][]json.RawMessage
-	if err := json.Unmarshal([]byte(filterPolicyJSON), &policy); err != nil {
-		// Malformed policy -- deliver to be safe (same as AWS fallback).
-		return true
-	}
-
-	// Every key in the policy must match at least one condition in its array.
-	for key, conditions := range policy {
-		attr, exists := attributes[key]
-
-		if !matchesConditions(conditions, attr.StringValue, exists) {
-			return false
-		}
-	}
-
-	return true
-}
-
-// matchesConditions evaluates a single filter-policy key's condition array.
-// The attribute must satisfy at least one condition in the array.
-func matchesConditions(conditions []json.RawMessage, value string, exists bool) bool {
-	for _, raw := range conditions {
-		if matchesSingleCondition(raw, value, exists) {
-			return true
-		}
-	}
-
-	return false
-}
-
-// matchesSingleCondition checks one condition entry.  It can be a plain
-// string (exact match) or an object with an operator key.
-func matchesSingleCondition(raw json.RawMessage, value string, exists bool) bool {
-	// Try plain string (exact match).
-	var s string
-	if err := json.Unmarshal(raw, &s); err == nil {
-		return exists && value == s
-	}
-
-	// Try number (exact numeric match against StringValue).
-	var n json.Number
-	if err := json.Unmarshal(raw, &n); err == nil {
-		return exists && value == n.String()
-	}
-
-	// Try boolean -- the only useful boolean in a condition array is
-	// a bare true/false which AWS does not actually support at the
-	// top level (it needs {"exists": true/false}), but handle it
-	// gracefully.
-	var b bool
-	if err := json.Unmarshal(raw, &b); err == nil {
-		if b {
-			return exists
-		}
-
-		return !exists
-	}
-
-	// Try object (operator form).
-	var obj map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &obj); err != nil {
-		return false
-	}
-
-	return matchesOperator(obj, value, exists)
-}
-
-// matchesOperator handles object-form conditions like {"exists": true},
-// {"prefix": "pay"}, {"anything-but": ["x"]}.
-//
-// matchesOperator evaluates a single SNS filter-policy operator object. Each
-// operator returns (result, matched); an unparseable operator value is treated
-// as not-matched so evaluation falls through, preserving the original behavior.
-func matchesOperator(obj map[string]json.RawMessage, value string, exists bool) bool {
-	if result, matched := matchExists(obj, exists); matched {
-		return result
-	}
-
-	if result, matched := matchPrefix(obj, value, exists); matched {
-		return result
-	}
-
-	if result, matched := matchAnythingBut(obj, value, exists); matched {
-		return result
-	}
-
-	return false
-}
-
-// matchExists handles {"exists": true/false}.
-func matchExists(obj map[string]json.RawMessage, exists bool) (bool, bool) {
-	raw, ok := obj["exists"]
-	if !ok {
-		return false, false
-	}
-
-	var want bool
-	if err := json.Unmarshal(raw, &want); err != nil {
-		return false, false
-	}
-
-	return want == exists, true
-}
-
-// matchPrefix handles {"prefix": "val"}.
-func matchPrefix(obj map[string]json.RawMessage, value string, exists bool) (bool, bool) {
-	raw, ok := obj["prefix"]
-	if !ok {
-		return false, false
-	}
-
-	var prefix string
-	if err := json.Unmarshal(raw, &prefix); err != nil {
-		return false, false
-	}
-
-	return exists && strings.HasPrefix(value, prefix), true
-}
-
-// matchAnythingBut handles {"anything-but": ["v1",...]} or {"anything-but": "v1"}.
-func matchAnythingBut(obj map[string]json.RawMessage, value string, exists bool) (bool, bool) {
-	raw, ok := obj["anything-but"]
-	if !ok {
-		return false, false
-	}
-
-	if !exists {
-		return false, true
-	}
-
-	var arr []string
-	if err := json.Unmarshal(raw, &arr); err == nil {
-		for _, deny := range arr {
-			if value == deny {
-				return false, true
-			}
-		}
-
-		return true, true
-	}
-
-	var single string
-	if err := json.Unmarshal(raw, &single); err == nil {
-		return value != single, true
-	}
-
-	return false, false
-}
-
 // deliverMessage delivers the subscription's protocol entry of messages to a
 // subscription.
 func (m *MemoryStorage) deliverMessage(ctx context.Context, sub *Subscription, messages protocolMessages, subject, messageID, messageGroupID, messageDeduplicationID string, attributes map[string]MessageAttribute) error {
-	if sub.SubscriptionAttributes != nil {
-		if fp, ok := sub.SubscriptionAttributes["FilterPolicy"]; ok {
-			if !matchesFilterPolicy(fp, attributes) {
-				return nil
-			}
-		}
-	}
-
 	message := messages.forProtocol(sub.Protocol)
+
+	if !evaluateFilterPolicy(sub, message, attributes) {
+		return nil
+	}
 
 	switch sub.Protocol {
 	case protocolSQS:
