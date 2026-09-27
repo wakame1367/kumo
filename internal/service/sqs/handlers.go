@@ -229,9 +229,10 @@ func (s *Service) SendMessage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSONResponse(w, SendMessageResponse{
-		MessageID:        msg.MessageID,
-		MD5OfMessageBody: msg.MD5OfBody,
-		SequenceNumber:   msg.SequenceNumber,
+		MessageID:              msg.MessageID,
+		MD5OfMessageBody:       msg.MD5OfBody,
+		MD5OfMessageAttributes: md5OfMessageAttributes(msg.MessageAttributes),
+		SequenceNumber:         msg.SequenceNumber,
 	})
 }
 
@@ -298,10 +299,11 @@ func (s *Service) processBatchEntries(ctx context.Context, queueURL string, entr
 		}
 
 		resp.Successful = append(resp.Successful, SendMessageBatchResultEntry{
-			ID:               entry.ID,
-			MessageID:        msg.MessageID,
-			MD5OfMessageBody: msg.MD5OfBody,
-			SequenceNumber:   msg.SequenceNumber,
+			ID:                     entry.ID,
+			MessageID:              msg.MessageID,
+			MD5OfMessageBody:       msg.MD5OfBody,
+			MD5OfMessageAttributes: md5OfMessageAttributes(msg.MessageAttributes),
+			SequenceNumber:         msg.SequenceNumber,
 		})
 	}
 
@@ -363,23 +365,28 @@ func (s *Service) ReceiveMessage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSONResponse(w, ReceiveMessageResponse{
-		Messages: convertMessagesToResponse(messages),
+		Messages: convertMessagesToResponse(messages, req.AttributeNames, req.MessageAttributeNames),
 	})
 }
 
-// convertMessagesToResponse converts Message slice to MessageResponse slice.
-func convertMessagesToResponse(messages []*Message) []MessageResponse {
+// convertMessagesToResponse converts Message slice to MessageResponse slice,
+// applying the AttributeNames/MessageAttributeNames selections SQS honours:
+// an empty selection returns no attributes, "All" returns everything.
+func convertMessagesToResponse(messages []*Message, attributeNames, messageAttributeNames []string) []MessageResponse {
 	result := make([]MessageResponse, len(messages))
 
 	for i, msg := range messages {
+		msgAttrs := filterMessageAttributes(msg, messageAttributeNames)
+
 		result[i] = MessageResponse{
-			MessageID:         msg.MessageID,
-			ReceiptHandle:     msg.ReceiptHandle,
-			MD5OfBody:         msg.MD5OfBody,
-			Body:              msg.Body,
-			Attributes:        msg.Attributes,
-			MessageAttributes: msg.MessageAttributes,
-			SequenceNumber:    msg.SequenceNumber,
+			MessageID:              msg.MessageID,
+			ReceiptHandle:          msg.ReceiptHandle,
+			MD5OfBody:              msg.MD5OfBody,
+			Body:                   msg.Body,
+			Attributes:             filterSystemAttributes(msg, attributeNames),
+			MD5OfMessageAttributes: md5OfMessageAttributes(msgAttrs),
+			MessageAttributes:      msgAttrs,
+			SequenceNumber:         msg.SequenceNumber,
 		}
 	}
 
@@ -697,7 +704,138 @@ func (s *Service) RemovePermission(w http.ResponseWriter, r *http.Request) {
 	writeJSONResponse(w, struct{}{})
 }
 
-// writeJSONResponse writes a JSON response with HTTP 200 OK.
+// ListDeadLetterSourceQueues handles the ListDeadLetterSourceQueues action.
+func (s *Service) ListDeadLetterSourceQueues(w http.ResponseWriter, r *http.Request) {
+	var req ListDeadLetterSourceQueuesRequest
+	if !decodeSQSRequest(w, r, &req) {
+		return
+	}
+
+	if !requireSQSParameter(w, req.QueueURL, "QueueUrl") {
+		return
+	}
+
+	queues, err := s.storage.ListDeadLetterSourceQueues(r.Context(), req.QueueURL)
+	if err != nil {
+		var qErr *QueueError
+		if errors.As(err, &qErr) {
+			writeSQSError(w, qErr.Code, qErr.Message, http.StatusBadRequest)
+
+			return
+		}
+
+		writeSQSError(w, "InternalError", "Internal server error", http.StatusInternalServerError)
+
+		return
+	}
+
+	urls := make([]string, len(queues))
+	for i, q := range queues {
+		urls[i] = q.URL
+	}
+
+	writeJSONResponse(w, ListDeadLetterSourceQueuesResponse{QueueURLs: urls})
+}
+
+// StartMessageMoveTask handles the StartMessageMoveTask action.
+func (s *Service) StartMessageMoveTask(w http.ResponseWriter, r *http.Request) {
+	var req StartMessageMoveTaskRequest
+	if !decodeSQSRequest(w, r, &req) {
+		return
+	}
+
+	if !requireSQSParameter(w, req.SourceARN, "SourceArn") {
+		return
+	}
+
+	task, err := s.storage.StartMessageMoveTask(r.Context(), req.SourceARN, req.DestinationARN, req.MaxNumberOfMessagesPerSecond)
+	if err != nil {
+		var qErr *QueueError
+		if errors.As(err, &qErr) {
+			writeSQSError(w, qErr.Code, qErr.Message, http.StatusBadRequest)
+
+			return
+		}
+
+		writeSQSError(w, "InternalError", "Internal server error", http.StatusInternalServerError)
+
+		return
+	}
+
+	writeJSONResponse(w, StartMessageMoveTaskResponse{TaskHandle: task.TaskHandle})
+}
+
+// ListMessageMoveTasks handles the ListMessageMoveTasks action.
+func (s *Service) ListMessageMoveTasks(w http.ResponseWriter, r *http.Request) {
+	var req ListMessageMoveTasksRequest
+	if !decodeSQSRequest(w, r, &req) {
+		return
+	}
+
+	if !requireSQSParameter(w, req.SourceARN, "SourceArn") {
+		return
+	}
+
+	tasks, err := s.storage.ListMessageMoveTasks(r.Context(), req.SourceARN)
+	if err != nil {
+		var qErr *QueueError
+		if errors.As(err, &qErr) {
+			writeSQSError(w, qErr.Code, qErr.Message, http.StatusBadRequest)
+
+			return
+		}
+
+		writeSQSError(w, "InternalError", "Internal server error", http.StatusInternalServerError)
+
+		return
+	}
+
+	results := make([]MessageMoveTaskResultEntry, 0, len(tasks))
+	for _, t := range tasks {
+		results = append(results, MessageMoveTaskResultEntry{
+			TaskHandle:                        t.TaskHandle,
+			Status:                            t.Status,
+			SourceARN:                         t.SourceARN,
+			DestinationARN:                    t.DestinationARN,
+			FailureReason:                     t.FailureReason,
+			ApproximateNumberOfMessagesMoved:  t.ApproximateNumberOfMessagesMoved,
+			ApproximateNumberOfMessagesToMove: t.ApproximateNumberOfMessagesToMove,
+			MaxNumberOfMessagesPerSecond:      t.MaxNumberOfMessagesPerSecond,
+			StartedTimestamp:                  float64(t.StartedTimestamp.UnixMilli()) / 1000,
+		})
+	}
+
+	writeJSONResponse(w, ListMessageMoveTasksResponse{Results: results})
+}
+
+// CancelMessageMoveTask handles the CancelMessageMoveTask action.
+func (s *Service) CancelMessageMoveTask(w http.ResponseWriter, r *http.Request) {
+	var req CancelMessageMoveTaskRequest
+	if !decodeSQSRequest(w, r, &req) {
+		return
+	}
+
+	if !requireSQSParameter(w, req.TaskHandle, "TaskHandle") {
+		return
+	}
+
+	task, err := s.storage.CancelMessageMoveTask(r.Context(), req.TaskHandle)
+	if err != nil {
+		var qErr *QueueError
+		if errors.As(err, &qErr) {
+			writeSQSError(w, qErr.Code, qErr.Message, http.StatusBadRequest)
+
+			return
+		}
+
+		writeSQSError(w, "InternalError", "Internal server error", http.StatusInternalServerError)
+
+		return
+	}
+
+	writeJSONResponse(w, CancelMessageMoveTaskResponse{TaskHandle: task.TaskHandle})
+}
+
 func writeJSONResponse(w http.ResponseWriter, v any) {
 	service.WriteJSONResponse(w, service.ContentTypeAmzJSON10, v)
 }
@@ -752,6 +890,10 @@ var sqsActions = map[string]func(*Service, http.ResponseWriter, *http.Request){
 	"SetQueueAttributes":           (*Service).SetQueueAttributes,
 	actionChangeMessageVisibility:  (*Service).ChangeMessageVisibility,
 	"ChangeMessageVisibilityBatch": (*Service).ChangeMessageVisibilityBatch,
+	"ListDeadLetterSourceQueues":   (*Service).ListDeadLetterSourceQueues,
+	"StartMessageMoveTask":         (*Service).StartMessageMoveTask,
+	"ListMessageMoveTasks":         (*Service).ListMessageMoveTasks,
+	"CancelMessageMoveTask":        (*Service).CancelMessageMoveTask,
 }
 
 // DispatchAction routes the request to the appropriate handler based on X-Amz-Target header.

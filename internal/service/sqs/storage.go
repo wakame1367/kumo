@@ -10,6 +10,7 @@ import (
 	"maps"
 	"net/url"
 	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -31,6 +32,10 @@ type Storage interface {
 	CreateQueue(ctx context.Context, name string, attributes, tags map[string]string) (*Queue, error)
 	DeleteQueue(ctx context.Context, queueURL string) error
 	ListQueues(ctx context.Context, prefix string) ([]string, error)
+	ListDeadLetterSourceQueues(ctx context.Context, queueURL string) ([]*Queue, error)
+	StartMessageMoveTask(ctx context.Context, sourceARN, destinationARN string, maxPerSecond int64) (*MessageMoveTask, error)
+	ListMessageMoveTasks(ctx context.Context, sourceARN string) ([]*MessageMoveTask, error)
+	CancelMessageMoveTask(ctx context.Context, taskHandle string) (*MessageMoveTask, error)
 	GetQueueURL(ctx context.Context, name string) (string, error)
 	GetQueue(ctx context.Context, queueURL string) (*Queue, error)
 	ListQueueTags(ctx context.Context, queueURL string) (map[string]string, error)
@@ -96,10 +101,13 @@ var (
 
 // MemoryStorage implements Storage using in-memory maps.
 type MemoryStorage struct {
-	mu      sync.RWMutex          `json:"-"`
-	Queues  map[string]*QueueData `json:"queues"`
-	baseURL string
-	dataDir string
+	mu     sync.RWMutex          `json:"-"`
+	Queues map[string]*QueueData `json:"queues"`
+	// MoveTasks records message-move tasks keyed by task handle, so
+	// ListMessageMoveTasks and CancelMessageMoveTask can report them.
+	MoveTasks map[string]*MessageMoveTask `json:"moveTasks,omitempty"`
+	baseURL   string
+	dataDir   string
 }
 
 // QueueData holds all data associated with a single SQS queue.
@@ -115,8 +123,9 @@ type QueueData struct {
 // NewMemoryStorage creates a new in-memory SQS storage.
 func NewMemoryStorage(baseURL string, opts ...Option) *MemoryStorage {
 	s := &MemoryStorage{
-		Queues:  make(map[string]*QueueData),
-		baseURL: baseURL,
+		Queues:    make(map[string]*QueueData),
+		MoveTasks: make(map[string]*MessageMoveTask),
+		baseURL:   baseURL,
 	}
 	for _, o := range opts {
 		o(s)
@@ -502,6 +511,8 @@ func (qd *QueueData) updateFIFOCache(dedupID, messageID string) {
 }
 
 // SendMessage sends a message to a queue.
+//
+//nolint:cyclop,funlen // sequential AWS-parity send validation
 func (s *MemoryStorage) SendMessage(_ context.Context, queueURL, body string, delaySeconds int, messageAttributes map[string]MessageAttributeValue, messageGroupID, messageDeduplicationID string) (*Message, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -509,6 +520,33 @@ func (s *MemoryStorage) SendMessage(_ context.Context, queueURL, body string, de
 	_, qd, err := s.resolveQueueData(queueURL)
 	if err != nil {
 		return nil, err
+	}
+
+	if delaySeconds < 0 || delaySeconds > 900 {
+		return nil, &QueueError{
+			Code:    errCodeInvalidParameterValue,
+			Message: fmt.Sprintf("Value %d for parameter DelaySeconds is invalid. Reason: DelaySeconds must be between 0 and 900 seconds.", delaySeconds),
+		}
+	}
+
+	// MessageGroupId is allowed on standard queues (fair queues);
+	// MessageDeduplicationId is FIFO-only.
+	if !qd.Queue.FifoQueue && messageDeduplicationID != "" {
+		return nil, &QueueError{
+			Code:    errCodeInvalidParameterValue,
+			Message: fmt.Sprintf("Value %s for parameter MessageDeduplicationId is invalid. Reason: The request include parameter that is not valid for this queue type.", messageDeduplicationID),
+		}
+	}
+
+	if err := validateSendMessageAttributes(messageAttributes); err != nil {
+		return nil, err
+	}
+
+	if limit := qd.Queue.MaxMessageSize; limit > 0 && sendMessageSize(body, messageAttributes) > limit {
+		return nil, &QueueError{
+			Code:    errCodeInvalidParameterValue,
+			Message: fmt.Sprintf("One or more parameters are invalid. Reason: Message must be shorter than %d bytes.", limit),
+		}
 	}
 
 	now := time.Now()
@@ -1022,4 +1060,157 @@ func parseRedrivePolicy(q *Queue, val string) {
 
 		q.MaxReceiveCount = int(n)
 	}
+}
+
+// ListDeadLetterSourceQueues returns the queues whose RedrivePolicy sends
+// messages to the given queue (the dead-letter queue).
+func (s *MemoryStorage) ListDeadLetterSourceQueues(_ context.Context, queueURL string) ([]*Queue, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	_, qd, err := s.resolveQueueData(queueURL)
+	if err != nil {
+		return nil, err
+	}
+
+	var sources []*Queue
+
+	for _, other := range s.Queues {
+		if other.Queue.DeadLetterTargetArn == qd.Queue.ARN {
+			sources = append(sources, other.Queue)
+		}
+	}
+
+	sort.Slice(sources, func(i, j int) bool { return sources[i].ARN < sources[j].ARN })
+
+	return sources, nil
+}
+
+// resolveQueueByARN finds a queue by its ARN. Must be called under a lock.
+func (s *MemoryStorage) resolveQueueByARN(arn string) (*QueueData, error) {
+	for _, qd := range s.Queues {
+		if qd.Queue.ARN == arn {
+			return qd, nil
+		}
+	}
+
+	return nil, ErrQueueDoesNotExist
+}
+
+// StartMessageMoveTask moves the messages of sourceARN (a dead-letter queue)
+// to destinationARN, or — when no destination is given — back to the queue
+// that redrives into sourceARN. The move completes synchronously and the
+// resulting task is recorded for ListMessageMoveTasks/CancelMessageMoveTask.
+//
+//nolint:funlen // move-task bookkeeping follows AWS's task lifecycle
+func (s *MemoryStorage) StartMessageMoveTask(_ context.Context, sourceARN, destinationARN string, maxPerSecond int64) (*MessageMoveTask, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	src, err := s.resolveQueueByARN(sourceARN)
+	if err != nil {
+		return nil, err
+	}
+
+	destARN := destinationARN
+
+	if destARN == "" {
+		// AWS redrives into the queue that names this DLQ as its
+		// deadLetterTargetArn.
+		for _, qd := range s.Queues {
+			if qd.Queue.DeadLetterTargetArn == sourceARN {
+				destARN = qd.Queue.ARN
+
+				break
+			}
+		}
+	}
+
+	if destARN == "" {
+		return nil, &QueueError{
+			Code:    errCodeInvalidParameterValue,
+			Message: "Value for parameter DestinationArn is invalid: no queue redrives into the source queue and none was given",
+		}
+	}
+
+	dst, err := s.resolveQueueByARN(destARN)
+	if err != nil {
+		return nil, err
+	}
+
+	moved := int64(len(src.Messages))
+	now := time.Now()
+
+	for _, msg := range src.Messages {
+		msg.ReceiveCount = 0
+		msg.Attributes["ApproximateReceiveCount"] = "0"
+		msg.VisibleAt = now
+		dst.Messages = append(dst.Messages, msg)
+	}
+
+	src.Messages = nil
+
+	task := &MessageMoveTask{
+		TaskHandle:                        uuid.New().String(),
+		Status:                            "COMPLETED",
+		SourceARN:                         sourceARN,
+		DestinationARN:                    destARN,
+		MaxNumberOfMessagesPerSecond:      maxPerSecond,
+		ApproximateNumberOfMessagesMoved:  moved,
+		ApproximateNumberOfMessagesToMove: moved,
+		StartedTimestamp:                  now,
+	}
+
+	s.MoveTasks[task.TaskHandle] = task
+
+	select {
+	case dst.notify <- struct{}{}:
+	default:
+	}
+
+	s.saveLocked()
+
+	return task, nil
+}
+
+// ListMessageMoveTasks returns the move tasks started against sourceARN.
+func (s *MemoryStorage) ListMessageMoveTasks(_ context.Context, sourceARN string) ([]*MessageMoveTask, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var tasks []*MessageMoveTask
+
+	for _, t := range s.MoveTasks {
+		if t.SourceARN == sourceARN {
+			tasks = append(tasks, t)
+		}
+	}
+
+	sort.Slice(tasks, func(i, j int) bool { return tasks[i].StartedTimestamp.Before(tasks[j].StartedTimestamp) })
+
+	return tasks, nil
+}
+
+// CancelMessageMoveTask cancels a move task. Tasks complete synchronously in
+// kumo, so only an unknown handle fails — a completed task is returned as-is,
+// which is what callers checking status after a fast move observe.
+func (s *MemoryStorage) CancelMessageMoveTask(_ context.Context, taskHandle string) (*MessageMoveTask, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	task, ok := s.MoveTasks[taskHandle]
+	if !ok {
+		return nil, &QueueError{
+			Code:    "ResourceNotFoundException",
+			Message: "The message move task does not exist",
+		}
+	}
+
+	if task.Status == "RUNNING" {
+		task.Status = "CANCELLING"
+
+		s.saveLocked()
+	}
+
+	return task, nil
 }
