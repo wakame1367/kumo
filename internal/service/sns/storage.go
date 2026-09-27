@@ -1,10 +1,14 @@
 package sns
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"sort"
 	"strings"
 	"sync"
@@ -45,6 +49,36 @@ type LambdaInvoker interface {
 	InvokeAsync(ctx context.Context, functionArn string, payload []byte) error
 }
 
+// HTTPPoster delivers an SNS envelope to an http/https subscription
+// endpoint, mirroring the POST SNS performs.
+type HTTPPoster interface {
+	PostJSON(ctx context.Context, url string, payload []byte) error
+}
+
+// defaultHTTPPoster posts the envelope the way SNS does: the JSON document
+// as the body with a text/plain content type.
+type defaultHTTPPoster struct {
+	client *http.Client
+}
+
+// PostJSON implements HTTPPoster.
+func (d defaultHTTPPoster) PostJSON(ctx context.Context, url string, payload []byte) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
+	if err != nil {
+		return fmt.Errorf("failed to build request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "text/plain; charset=UTF-8")
+
+	resp, err := d.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to POST: %w", err)
+	}
+	defer resp.Body.Close()
+
+	return nil
+}
+
 // Storage defines the SNS storage interface.
 type Storage interface {
 	CreateTopic(ctx context.Context, name string, attributes map[string]string, tags []Tag) (*Topic, error)
@@ -56,7 +90,8 @@ type Storage interface {
 	GetSubscription(ctx context.Context, subscriptionARN string) (*Subscription, error)
 	SetSubscriptionAttribute(ctx context.Context, subscriptionARN, name, value string) error
 	Unsubscribe(ctx context.Context, subscriptionARN string) error
-	Publish(ctx context.Context, topicARN, message, messageStructure, subject, messageGroupID, messageDeduplicationID string, attributes map[string]MessageAttribute) (string, error)
+	ConfirmSubscription(ctx context.Context, topicARN, token string) (*Subscription, error)
+	Publish(ctx context.Context, topicARN, message, messageStructure, subject, messageGroupID, messageDeduplicationID string, attributes map[string]MessageAttribute) (*PublishResult, error)
 	ListSubscriptions(ctx context.Context, nextToken string) ([]*Subscription, string, error)
 	ListSubscriptionsByTopic(ctx context.Context, topicARN, nextToken string) ([]*Subscription, string, error)
 	ListTagsForResource(ctx context.Context, resourceArn string) ([]Tag, error)
@@ -80,6 +115,19 @@ var (
 	_ json.Unmarshaler = (*MemoryStorage)(nil)
 )
 
+// fifoDedupEntry records one accepted deduplication ID on a FIFO topic.
+// A Publish that repeats the ID inside the 5-minute deduplication window
+// is acknowledged with the original MessageId and SequenceNumber but is
+// not delivered again.
+type fifoDedupEntry struct {
+	MessageID      string
+	SequenceNumber string
+	ExpiresAt      time.Time
+}
+
+// fifoDedupWindow is the interval SNS uses for FIFO deduplication.
+const fifoDedupWindow = 5 * time.Minute
+
 // MemoryStorage implements Storage with in-memory data.
 type MemoryStorage struct {
 	mu            sync.RWMutex             `json:"-"`
@@ -89,7 +137,12 @@ type MemoryStorage struct {
 	baseURL       string
 	SqsPublisher  SQSPublisher `json:"-"`
 	lambdaInvoker LambdaInvoker
+	httpPoster    HTTPPoster
 	dataDir       string
+	// fifoDedup holds the per-topic deduplication window, keyed by topic
+	// ARN then by deduplication ID. Not persisted: like SQS's
+	// DeduplicationCache it is a best-effort delivery detail.
+	fifoDedup map[string]map[string]fifoDedupEntry `json:"-"`
 }
 
 // NewMemoryStorage creates a new in-memory SNS storage.
@@ -99,6 +152,8 @@ func NewMemoryStorage(baseURL string, opts ...Option) *MemoryStorage {
 		Subscriptions: make(map[string]*Subscription),
 		Tags:          make(map[string][]Tag),
 		baseURL:       baseURL,
+		fifoDedup:     make(map[string]map[string]fifoDedupEntry),
+		httpPoster:    defaultHTTPPoster{client: &http.Client{Timeout: 15 * time.Second}},
 	}
 	for _, o := range opts {
 		o(s)
@@ -151,6 +206,10 @@ func (m *MemoryStorage) UnmarshalJSON(data []byte) error {
 		m.Tags = make(map[string][]Tag)
 	}
 
+	if m.fifoDedup == nil {
+		m.fifoDedup = make(map[string]map[string]fifoDedupEntry)
+	}
+
 	return nil
 }
 
@@ -187,6 +246,13 @@ func (m *MemoryStorage) SetLambdaInvoker(invoker LambdaInvoker) {
 	m.lambdaInvoker = invoker
 }
 
+// SetHTTPPoster overrides the HTTP delivery used for http/https
+// subscriptions (and their SubscriptionConfirmation messages). Passing nil
+// disables HTTP delivery entirely.
+func (m *MemoryStorage) SetHTTPPoster(poster HTTPPoster) {
+	m.httpPoster = poster
+}
+
 // CreateTopic creates a new topic.
 func (m *MemoryStorage) CreateTopic(_ context.Context, name string, attributes map[string]string, tags []Tag) (*Topic, error) {
 	m.mu.Lock()
@@ -199,10 +265,49 @@ func (m *MemoryStorage) CreateTopic(_ context.Context, name string, attributes m
 		}
 	}
 
+	fifo := strings.EqualFold(attributes["FifoTopic"], "true")
+
+	// The topic type and the name must agree: a FIFO topic name ends in
+	// .fifo, and the .fifo suffix is reserved for FIFO topics. AWS reports
+	// both mismatches as "Invalid parameter: Topic Name".
+	if fifo != strings.HasSuffix(name, ".fifo") {
+		return nil, &TopicError{
+			Code:    "InvalidParameter",
+			Message: "Invalid parameter: Topic Name",
+		}
+	}
+
 	arn := m.buildTopicARN(name)
 
 	if topic, exists := m.Topics[arn]; exists {
+		// CreateTopic is idempotent on the name, but AWS rejects a repeat
+		// create when the attributes or tags differ from the stored ones.
+		if !attributesMatchExisting(topic, attributes) {
+			return nil, &TopicError{
+				Code:    "InvalidParameter",
+				Message: "Invalid parameter: Attributes Reason: Topic already exists with different attributes",
+			}
+		}
+
+		if !tagsMatchExisting(m.Tags[arn], tags) {
+			return nil, &TopicError{
+				Code:    "InvalidParameter",
+				Message: "Invalid parameter: Tags Reason: Topic already exists with different tags",
+			}
+		}
+
 		return topic, nil
+	}
+
+	if fifo {
+		if attributes == nil {
+			attributes = make(map[string]string)
+		}
+
+		attributes["FifoTopic"] = "true"
+	} else {
+		// AWS does not store an explicit FifoTopic=false.
+		delete(attributes, "FifoTopic")
 	}
 
 	topic := &Topic{
@@ -211,6 +316,7 @@ func (m *MemoryStorage) CreateTopic(_ context.Context, name string, attributes m
 		CreatedTime:   time.Now(),
 		Attributes:    attributes,
 		Subscriptions: make(map[string]*Subscription),
+		Fifo:          fifo,
 	}
 
 	if len(tags) > 0 {
@@ -260,6 +366,12 @@ func (m *MemoryStorage) SetTopicAttribute(_ context.Context, topicARN, name, val
 		return &TopicError{Code: errNotFound, Message: "Topic does not exist: " + topicARN}
 	}
 
+	// The topic type is immutable: AWS rejects SetTopicAttributes on
+	// FifoTopic outright.
+	if name == "FifoTopic" {
+		return &TopicError{Code: errInvalidParameter, Message: "Invalid parameter: AttributeName"}
+	}
+
 	if topic.Attributes == nil {
 		topic.Attributes = make(map[string]string)
 	}
@@ -294,6 +406,7 @@ func (m *MemoryStorage) DeleteTopic(_ context.Context, topicARN string) error {
 
 	delete(m.Topics, topicARN)
 	delete(m.Tags, topicARN)
+	delete(m.fifoDedup, topicARN)
 
 	m.saveLocked()
 
@@ -447,7 +560,35 @@ func (m *MemoryStorage) Subscribe(_ context.Context, topicARN, protocol, endpoin
 		}
 	}
 
+	// FIFO pairing rules: a FIFO topic accepts only sqs subscriptions (any
+	// queue type), and a FIFO queue endpoint cannot hang off a standard
+	// topic. Messages taken from AWS's recorded responses.
+	if topic.Fifo && protocol != protocolSQS {
+		return nil, &TopicError{
+			Code:    "InvalidParameter",
+			Message: fmt.Sprintf("Invalid parameter: Protocol %s is not supported for FIFO topics", protocol),
+		}
+	}
+
+	if !topic.Fifo && protocol == protocolSQS && isFIFOName(endpoint) {
+		return nil, &TopicError{
+			Code:    "InvalidParameter",
+			Message: "Invalid parameter: Invalid parameter: Endpoint Reason: FIFO SQS Queues can not be subscribed to standard SNS topics",
+		}
+	}
+
+	if err := validateSubscriptionAttributes(attributes); err != nil {
+		return nil, err
+	}
+
 	subscriptionARN := m.buildSubscriptionARN(topicARN)
+
+	if endpoint == "" {
+		return nil, &TopicError{
+			Code:    errInvalidParameter,
+			Message: "Invalid parameter: Endpoint",
+		}
+	}
 
 	subscription := &Subscription{
 		ARN:                    subscriptionARN,
@@ -458,9 +599,13 @@ func (m *MemoryStorage) Subscribe(_ context.Context, topicARN, protocol, endpoin
 		SubscriptionAttributes: attributes,
 	}
 
-	// For SQS and Lambda protocols, auto-confirm.
+	// For SQS and Lambda protocols, auto-confirm. Other protocols stay
+	// pending until ConfirmSubscription is called with the issued token.
 	if protocol == protocolSQS || protocol == protocolLambda {
 		subscription.ConfirmationWasAuthenticated = true
+		subscription.Confirmed = true
+	} else {
+		subscription.ConfirmationToken = uuid.New().String()
 	}
 
 	m.Subscriptions[subscriptionARN] = subscription
@@ -468,7 +613,88 @@ func (m *MemoryStorage) Subscribe(_ context.Context, topicARN, protocol, endpoin
 
 	m.saveLocked()
 
+	if !subscription.Confirmed {
+		go m.sendSubscriptionConfirmation(subscription)
+	}
+
 	return subscription, nil
+}
+
+// needsConfirmation reports whether the protocol requires the subscriber to
+// confirm the subscription before messages are delivered.
+func (s *Subscription) needsConfirmation() bool {
+	return !s.Confirmed
+}
+
+// sendSubscriptionConfirmation POSTs the SubscriptionConfirmation envelope
+// to an http/https endpoint, the way SNS does on Subscribe. Other pending
+// protocols (email, sms, ...) only get the pending state and token.
+func (m *MemoryStorage) sendSubscriptionConfirmation(sub *Subscription) {
+	if m.httpPoster == nil || (sub.Protocol != protocolHTTP && sub.Protocol != protocolHTTPS) {
+		return
+	}
+
+	if m.baseURL == "" {
+		return
+	}
+
+	subscribeURL := fmt.Sprintf("%s/?Action=ConfirmSubscription&TopicArn=%s&Token=%s",
+		m.baseURL, sub.TopicARN, sub.ConfirmationToken)
+
+	envelope := map[string]any{
+		"Type":             "SubscriptionConfirmation",
+		"MessageId":        uuid.New().String(),
+		"Token":            sub.ConfirmationToken,
+		"TopicArn":         sub.TopicARN,
+		"Message":          fmt.Sprintf("You have chosen to subscribe to the topic %s.\nTo confirm the subscription, visit the SubscribeURL included in this message.", sub.TopicARN),
+		"SubscribeURL":     subscribeURL,
+		"Timestamp":        time.Now().UTC().Format(time.RFC3339),
+		"SignatureVersion": "1",
+		"Signature":        "EXAMPLE",
+		"SigningCertURL":   signingCertURLPlaceholder,
+	}
+
+	payload, err := json.Marshal(envelope)
+	if err != nil {
+		return
+	}
+
+	if err := m.httpPoster.PostJSON(context.Background(), sub.Endpoint, payload); err != nil {
+		slog.Debug("sns: subscription confirmation delivery failed",
+			"endpoint", sub.Endpoint, "error", err)
+	}
+}
+
+// ConfirmSubscription confirms a pending subscription by its token and
+// returns the subscription.
+func (m *MemoryStorage) ConfirmSubscription(_ context.Context, topicARN, token string) (*Subscription, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if _, exists := m.Topics[topicARN]; !exists {
+		return nil, &TopicError{
+			Code:    errNotFound,
+			Message: fmt.Sprintf("Topic does not exist: %s", topicARN),
+		}
+	}
+
+	for _, sub := range m.Subscriptions {
+		if sub.TopicARN != topicARN || sub.ConfirmationToken != token {
+			continue
+		}
+
+		sub.Confirmed = true
+		sub.ConfirmationWasAuthenticated = true
+
+		m.saveLocked()
+
+		return sub, nil
+	}
+
+	return nil, &TopicError{
+		Code:    errInvalidParameter,
+		Message: "Invalid parameter: Token",
+	}
 }
 
 // GetSubscription returns a subscription by ARN.
@@ -498,6 +724,10 @@ func (m *MemoryStorage) SetSubscriptionAttribute(_ context.Context, subscription
 			Code:    errNotFound,
 			Message: fmt.Sprintf("Subscription does not exist: %s", subscriptionARN),
 		}
+	}
+
+	if err := validateSubscriptionAttributes(map[string]string{name: value}); err != nil {
+		return err
 	}
 
 	if subscription.SubscriptionAttributes == nil {
@@ -537,12 +767,38 @@ func (m *MemoryStorage) Unsubscribe(_ context.Context, subscriptionARN string) e
 
 // Publish publishes a message to a topic.
 // Publish fans a message out to the topic's subscribers. Like SNS, it
-// validates a json-structured body before it looks the topic up, so a
-// malformed body is reported even when the topic does not exist.
-func (m *MemoryStorage) Publish(ctx context.Context, topicARN, message, messageStructure, subject, messageGroupID, messageDeduplicationID string, attributes map[string]MessageAttribute) (string, error) {
+// validates a json-structured body and the FIFO-only parameters before it
+// looks the topic up, so a malformed body is reported even when the topic
+// does not exist.
+func (m *MemoryStorage) Publish(ctx context.Context, topicARN, message, messageStructure, subject, messageGroupID, messageDeduplicationID string, attributes map[string]MessageAttribute) (*PublishResult, error) {
 	messages, err := messagesForStructure(message, messageStructure)
 	if err != nil {
-		return "", err
+		return nil, err
+	}
+
+	if err := validatePublishMessageAttributes(message, attributes); err != nil {
+		return nil, err
+	}
+
+	fifo := isFIFOName(topicARN)
+
+	// FIFO-only parameter checks precede the topic lookup, as on SNS: a
+	// missing MessageGroupId on a .fifo ARN is InvalidParameter even when
+	// the topic does not exist, and a stray MessageDeduplicationId on a
+	// standard ARN fails before the lookup too. A bare MessageGroupId on a
+	// standard topic is accepted — SNS forwards it to standard SQS
+	// subscriptions for fair queues.
+	switch {
+	case fifo && messageGroupID == "":
+		return nil, &TopicError{
+			Code:    errInvalidParameter,
+			Message: "Invalid parameter: The MessageGroupId parameter is required for FIFO topics",
+		}
+	case !fifo && messageDeduplicationID != "":
+		return nil, &TopicError{
+			Code:    errInvalidParameter,
+			Message: "Invalid parameter: MessageDeduplicationId Reason: The request includes MessageDeduplicationId parameter that is not valid for this topic type",
+		}
 	}
 
 	m.mu.RLock()
@@ -551,7 +807,7 @@ func (m *MemoryStorage) Publish(ctx context.Context, topicARN, message, messageS
 	if !exists {
 		m.mu.RUnlock()
 
-		return "", &TopicError{
+		return nil, &TopicError{
 			Code:    errNotFound,
 			Message: fmt.Sprintf("Topic does not exist: %s", topicARN),
 		}
@@ -565,6 +821,59 @@ func (m *MemoryStorage) Publish(ctx context.Context, topicARN, message, messageS
 	m.mu.RUnlock()
 
 	messageID := uuid.New().String()
+
+	var sequenceNumber string
+
+	if fifo {
+		// MessageDeduplicationId falls back to ContentBasedDeduplication
+		// (sha256 of the raw message) the way SNS does; the resolved ID is
+		// what SQS FIFO subscribers receive so the queue dedupes too.
+		if messageDeduplicationID == "" {
+			if topic.Attributes["ContentBasedDeduplication"] != "true" {
+				return nil, &TopicError{
+					Code:    errInvalidParameter,
+					Message: "Invalid parameter: The topic should either have ContentBasedDeduplication enabled or MessageDeduplicationId provided explicitly",
+				}
+			}
+
+			sum := sha256.Sum256([]byte(message))
+			messageDeduplicationID = hex.EncodeToString(sum[:])
+		}
+
+		m.mu.Lock()
+
+		window := m.fifoDedup[topicARN]
+		if window == nil {
+			window = make(map[string]fifoDedupEntry)
+			m.fifoDedup[topicARN] = window
+		}
+
+		now := time.Now()
+
+		for id, entry := range window {
+			if now.After(entry.ExpiresAt) {
+				delete(window, id)
+			}
+		}
+
+		if entry, duplicate := window[messageDeduplicationID]; duplicate {
+			m.mu.Unlock()
+
+			// Acknowledge the repeat with the original identifiers and
+			// deliver nothing, the way SNS suppresses the duplicate.
+			return &PublishResult{MessageID: entry.MessageID, SequenceNumber: entry.SequenceNumber}, nil
+		}
+
+		topic.SequenceCounter++
+		sequenceNumber = fmt.Sprintf("%d", topic.SequenceCounter)
+		window[messageDeduplicationID] = fifoDedupEntry{
+			MessageID:      messageID,
+			SequenceNumber: sequenceNumber,
+			ExpiresAt:      now.Add(fifoDedupWindow),
+		}
+
+		m.mu.Unlock()
+	}
 
 	// Deliver to all subscriptions.
 	for _, sub := range subscriptions {
@@ -580,187 +889,17 @@ func (m *MemoryStorage) Publish(ctx context.Context, topicARN, message, messageS
 		}
 	}
 
-	return messageID, nil
-}
-
-// matchesFilterPolicy checks whether the given message attributes satisfy the
-// subscription's FilterPolicy.  A FilterPolicy is a JSON object whose keys
-// are attribute names and whose values are arrays of allowed values.
-//
-// AWS supports several filter policy operators (exact match, prefix,
-// anything-but, numeric, exists, etc.).  This implementation covers:
-//   - exact string match  (e.g. ["billing"])
-//   - "exists": true/false
-//   - "prefix"
-//   - "anything-but"  (string list)
-//
-// If the subscription has no FilterPolicy, all messages match.
-func matchesFilterPolicy(filterPolicyJSON string, attributes map[string]MessageAttribute) bool {
-	if filterPolicyJSON == "" {
-		return true
-	}
-
-	var policy map[string][]json.RawMessage
-	if err := json.Unmarshal([]byte(filterPolicyJSON), &policy); err != nil {
-		// Malformed policy -- deliver to be safe (same as AWS fallback).
-		return true
-	}
-
-	// Every key in the policy must match at least one condition in its array.
-	for key, conditions := range policy {
-		attr, exists := attributes[key]
-
-		if !matchesConditions(conditions, attr.StringValue, exists) {
-			return false
-		}
-	}
-
-	return true
-}
-
-// matchesConditions evaluates a single filter-policy key's condition array.
-// The attribute must satisfy at least one condition in the array.
-func matchesConditions(conditions []json.RawMessage, value string, exists bool) bool {
-	for _, raw := range conditions {
-		if matchesSingleCondition(raw, value, exists) {
-			return true
-		}
-	}
-
-	return false
-}
-
-// matchesSingleCondition checks one condition entry.  It can be a plain
-// string (exact match) or an object with an operator key.
-func matchesSingleCondition(raw json.RawMessage, value string, exists bool) bool {
-	// Try plain string (exact match).
-	var s string
-	if err := json.Unmarshal(raw, &s); err == nil {
-		return exists && value == s
-	}
-
-	// Try number (exact numeric match against StringValue).
-	var n json.Number
-	if err := json.Unmarshal(raw, &n); err == nil {
-		return exists && value == n.String()
-	}
-
-	// Try boolean -- the only useful boolean in a condition array is
-	// a bare true/false which AWS does not actually support at the
-	// top level (it needs {"exists": true/false}), but handle it
-	// gracefully.
-	var b bool
-	if err := json.Unmarshal(raw, &b); err == nil {
-		if b {
-			return exists
-		}
-
-		return !exists
-	}
-
-	// Try object (operator form).
-	var obj map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &obj); err != nil {
-		return false
-	}
-
-	return matchesOperator(obj, value, exists)
-}
-
-// matchesOperator handles object-form conditions like {"exists": true},
-// {"prefix": "pay"}, {"anything-but": ["x"]}.
-//
-// matchesOperator evaluates a single SNS filter-policy operator object. Each
-// operator returns (result, matched); an unparseable operator value is treated
-// as not-matched so evaluation falls through, preserving the original behavior.
-func matchesOperator(obj map[string]json.RawMessage, value string, exists bool) bool {
-	if result, matched := matchExists(obj, exists); matched {
-		return result
-	}
-
-	if result, matched := matchPrefix(obj, value, exists); matched {
-		return result
-	}
-
-	if result, matched := matchAnythingBut(obj, value, exists); matched {
-		return result
-	}
-
-	return false
-}
-
-// matchExists handles {"exists": true/false}.
-func matchExists(obj map[string]json.RawMessage, exists bool) (bool, bool) {
-	raw, ok := obj["exists"]
-	if !ok {
-		return false, false
-	}
-
-	var want bool
-	if err := json.Unmarshal(raw, &want); err != nil {
-		return false, false
-	}
-
-	return want == exists, true
-}
-
-// matchPrefix handles {"prefix": "val"}.
-func matchPrefix(obj map[string]json.RawMessage, value string, exists bool) (bool, bool) {
-	raw, ok := obj["prefix"]
-	if !ok {
-		return false, false
-	}
-
-	var prefix string
-	if err := json.Unmarshal(raw, &prefix); err != nil {
-		return false, false
-	}
-
-	return exists && strings.HasPrefix(value, prefix), true
-}
-
-// matchAnythingBut handles {"anything-but": ["v1",...]} or {"anything-but": "v1"}.
-func matchAnythingBut(obj map[string]json.RawMessage, value string, exists bool) (bool, bool) {
-	raw, ok := obj["anything-but"]
-	if !ok {
-		return false, false
-	}
-
-	if !exists {
-		return false, true
-	}
-
-	var arr []string
-	if err := json.Unmarshal(raw, &arr); err == nil {
-		for _, deny := range arr {
-			if value == deny {
-				return false, true
-			}
-		}
-
-		return true, true
-	}
-
-	var single string
-	if err := json.Unmarshal(raw, &single); err == nil {
-		return value != single, true
-	}
-
-	return false, false
+	return &PublishResult{MessageID: messageID, SequenceNumber: sequenceNumber}, nil
 }
 
 // deliverMessage delivers the subscription's protocol entry of messages to a
 // subscription.
 func (m *MemoryStorage) deliverMessage(ctx context.Context, sub *Subscription, messages protocolMessages, subject, messageID, messageGroupID, messageDeduplicationID string, attributes map[string]MessageAttribute) error {
-	if sub.SubscriptionAttributes != nil {
-		if fp, ok := sub.SubscriptionAttributes["FilterPolicy"]; ok {
-			if !matchesFilterPolicy(fp, attributes) {
-				return nil
-			}
-		}
-	}
-
 	message := messages.forProtocol(sub.Protocol)
+
+	if !evaluateFilterPolicy(sub, message, attributes) {
+		return nil
+	}
 
 	switch sub.Protocol {
 	case protocolSQS:
@@ -768,12 +907,28 @@ func (m *MemoryStorage) deliverMessage(ctx context.Context, sub *Subscription, m
 	case protocolLambda:
 		return m.deliverToLambda(ctx, sub, message, subject, messageID, attributes)
 	case protocolHTTP, protocolHTTPS:
-		// HTTP delivery not implemented in emulator.
-		return nil
+		return m.deliverToHTTP(ctx, sub, message, subject, messageID, attributes)
 	default:
 		// Other protocols not implemented.
 		return nil
 	}
+}
+
+// deliverToHTTP POSTs the SNS notification envelope to an http or https
+// subscription endpoint. Pending subscriptions receive nothing; SNS skips
+// them until ConfirmSubscription completes.
+func (m *MemoryStorage) deliverToHTTP(ctx context.Context, sub *Subscription, message, subject, messageID string, attributes map[string]MessageAttribute) error {
+	if sub.needsConfirmation() || m.httpPoster == nil {
+		return nil
+	}
+
+	payload := buildSNSNotificationEnvelope(sub.TopicARN, message, subject, messageID, attributes)
+
+	if err := m.httpPoster.PostJSON(ctx, sub.Endpoint, []byte(payload)); err != nil {
+		return fmt.Errorf("failed to POST to %s: %w", sub.Endpoint, err)
+	}
+
+	return nil
 }
 
 // deliverToSQS delivers a message to an sqs-protocol subscription. It
@@ -971,6 +1126,53 @@ func (m *MemoryStorage) ListSubscriptionsByTopic(_ context.Context, topicARN, ne
 
 func isValidTopicName(name string) bool {
 	return awsname.IsValidMessagingResource(name, 256)
+}
+
+// isFIFOName reports whether a topic name or ARN carries the .fifo marker.
+// A substring check matches SNS's own test: endpoints like
+// arn:aws:sqs:us-east-1:000000000000:q.fifo are detected the same way.
+func isFIFOName(nameOrARN string) bool {
+	return strings.Contains(nameOrARN, ".fifo")
+}
+
+// attributesMatchExisting reports whether every requested attribute already
+// exists on the topic with the same value; it is the "topic already exists
+// with different attributes" check AWS applies to a repeated CreateTopic.
+// An explicit FifoTopic=false counts as unset because AWS does not store it.
+func attributesMatchExisting(topic *Topic, requested map[string]string) bool {
+	for k, v := range requested {
+		if k == "FifoTopic" && v == "false" && topic.Attributes["FifoTopic"] == "" {
+			continue
+		}
+
+		if existing, ok := topic.Attributes[k]; !ok || existing != v {
+			return false
+		}
+	}
+
+	return true
+}
+
+// tagsMatchExisting reports whether every requested tag is already present on
+// the topic's tag list; AWS fails a repeated CreateTopic whose Tags differ.
+func tagsMatchExisting(existing, requested []Tag) bool {
+	for _, req := range requested {
+		found := false
+
+		for _, have := range existing {
+			if have == req {
+				found = true
+
+				break
+			}
+		}
+
+		if !found {
+			return false
+		}
+	}
+
+	return true
 }
 
 // buildTopicARN builds an ARN for a topic.

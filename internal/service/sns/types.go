@@ -15,6 +15,18 @@ type Topic struct {
 	CreatedTime   time.Time
 	Attributes    map[string]string
 	Subscriptions map[string]*Subscription
+	// Fifo marks a FIFO topic (created with FifoTopic=true and a .fifo
+	// name). SequenceCounter is the per-topic source of the SequenceNumber
+	// Publish returns for FIFO topics.
+	Fifo            bool
+	SequenceCounter uint64
+}
+
+// PublishResult is what Publish returns: the assigned MessageId and, for
+// FIFO topics, the per-topic SequenceNumber.
+type PublishResult struct {
+	MessageID      string
+	SequenceNumber string
 }
 
 // Subscription represents an SNS subscription.
@@ -26,6 +38,13 @@ type Subscription struct {
 	Owner                        string
 	ConfirmationWasAuthenticated bool
 	SubscriptionAttributes       map[string]string
+	// Confirmed reports whether the subscription completed the
+	// confirmation handshake. sqs/lambda subscriptions are confirmed
+	// immediately; the others stay pending until ConfirmSubscription.
+	Confirmed bool
+	// ConfirmationToken is the token issued for http(s)/email/sms
+	// subscriptions and validated by ConfirmSubscription.
+	ConfirmationToken string
 }
 
 // CreateTopicRequest is the request for CreateTopic.
@@ -75,6 +94,13 @@ type SubscribeResponse struct {
 	SubscriptionARN string `json:"SubscriptionArn"`
 }
 
+// ConfirmSubscriptionRequest is the request for ConfirmSubscription.
+type ConfirmSubscriptionRequest struct {
+	TopicArn                  string `json:"TopicArn"`
+	Token                     string `json:"Token"`
+	AuthenticateOnUnsubscribe string `json:"AuthenticateOnUnsubscribe,omitempty"`
+}
+
 // UnsubscribeRequest is the request for Unsubscribe.
 type UnsubscribeRequest struct {
 	SubscriptionARN string `json:"SubscriptionArn"`
@@ -96,6 +122,23 @@ type PublishRequest struct {
 type PublishResponse struct {
 	MessageID      string `json:"MessageId"`
 	SequenceNumber string `json:"SequenceNumber,omitempty"`
+}
+
+// PublishBatchRequest is the request for PublishBatch.
+type PublishBatchRequest struct {
+	TopicARN                   string                     `json:"TopicArn"`
+	PublishBatchRequestEntries []PublishBatchRequestEntry `json:"PublishBatchRequestEntries"`
+}
+
+// PublishBatchRequestEntry is a single message in a PublishBatch request.
+type PublishBatchRequestEntry struct {
+	ID                     string                      `json:"Id"`
+	Message                string                      `json:"Message"`
+	Subject                string                      `json:"Subject,omitempty"`
+	MessageStructure       string                      `json:"MessageStructure,omitempty"`
+	MessageAttributes      map[string]MessageAttribute `json:"MessageAttributes,omitempty"`
+	MessageDeduplicationID string                      `json:"MessageDeduplicationId,omitempty"`
+	MessageGroupID         string                      `json:"MessageGroupId,omitempty"`
 }
 
 // ListSubscriptionsRequest is the request for ListSubscriptions.
@@ -208,6 +251,19 @@ type XMLSubscribeResult struct {
 	SubscriptionArn string `xml:"SubscriptionArn"`
 }
 
+// XMLConfirmSubscriptionResponse is the XML response for ConfirmSubscription.
+type XMLConfirmSubscriptionResponse struct {
+	XMLName                   struct{}                     `xml:"ConfirmSubscriptionResponse"`
+	Xmlns                     string                       `xml:"xmlns,attr"`
+	ConfirmSubscriptionResult XMLConfirmSubscriptionResult `xml:"ConfirmSubscriptionResult"`
+	ResponseMetadata          ResponseMetadata             `xml:"ResponseMetadata"`
+}
+
+// XMLConfirmSubscriptionResult contains the ConfirmSubscription result.
+type XMLConfirmSubscriptionResult struct {
+	SubscriptionArn string `xml:"SubscriptionArn"`
+}
+
 // XMLUnsubscribeResponse is the XML response for Unsubscribe.
 type XMLUnsubscribeResponse struct {
 	XMLName          struct{}         `xml:"UnsubscribeResponse"`
@@ -227,6 +283,45 @@ type XMLPublishResponse struct {
 type XMLPublishResult struct {
 	MessageID      string `xml:"MessageId"`
 	SequenceNumber string `xml:"SequenceNumber,omitempty"`
+}
+
+// XMLPublishBatchResponse is the XML response for PublishBatch.
+type XMLPublishBatchResponse struct {
+	XMLName            struct{}              `xml:"PublishBatchResponse"`
+	Xmlns              string                `xml:"xmlns,attr"`
+	PublishBatchResult XMLPublishBatchResult `xml:"PublishBatchResult"`
+	ResponseMetadata   ResponseMetadata      `xml:"ResponseMetadata"`
+}
+
+// XMLPublishBatchResult contains the per-entry results of PublishBatch.
+type XMLPublishBatchResult struct {
+	Successful XMLSuccessfulEntries `xml:"Successful"`
+	Failed     XMLFailedEntries     `xml:"Failed"`
+}
+
+// XMLSuccessfulEntries wraps successful batch entries.
+type XMLSuccessfulEntries struct {
+	Member []XMLPublishBatchResultEntry `xml:"member"`
+}
+
+// XMLFailedEntries wraps failed batch entries.
+type XMLFailedEntries struct {
+	Member []XMLBatchResultErrorEntry `xml:"member"`
+}
+
+// XMLPublishBatchResultEntry is one accepted batch entry.
+type XMLPublishBatchResultEntry struct {
+	ID             string `xml:"Id"`
+	MessageID      string `xml:"MessageId"`
+	SequenceNumber string `xml:"SequenceNumber,omitempty"`
+}
+
+// XMLBatchResultErrorEntry is one rejected batch entry.
+type XMLBatchResultErrorEntry struct {
+	ID          string `xml:"Id"`
+	Code        string `xml:"Code"`
+	Message     string `xml:"Message"`
+	SenderFault bool   `xml:"SenderFault"`
 }
 
 // XMLListSubscriptionsResponse is the XML response for ListSubscriptions.

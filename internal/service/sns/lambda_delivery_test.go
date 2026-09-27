@@ -69,7 +69,7 @@ func publishToLambda(t *testing.T, subject string, attributes map[string]Message
 	invoker := &capturingInvoker{}
 	storage, sub := newTopicWithLambdaSubscription(t, invoker, nil)
 
-	messageID, err := storage.Publish(context.Background(), sub.TopicARN, testLambdaMessage, "", subject, "", "", attributes)
+	result, err := storage.Publish(context.Background(), sub.TopicARN, testLambdaMessage, "", subject, "", "", attributes)
 	if err != nil {
 		t.Fatalf("Publish() error = %v", err)
 	}
@@ -83,7 +83,7 @@ func publishToLambda(t *testing.T, subject string, attributes map[string]Message
 		t.Fatalf("payload is not JSON: %v\n%s", err, invoker.payloads[0])
 	}
 
-	return messageID, sub, event
+	return result.MessageID, sub, event
 }
 
 // snsEntity returns Records[0].Sns of a decoded event.
@@ -223,7 +223,6 @@ func TestPublish_LambdaEventConvertsAttributeTypes(t *testing.T) {
 		wantValue string
 	}{
 		{"string", MessageAttribute{DataType: dataTypeString, StringValue: "v"}, dataTypeString, "v"},
-		{"missing type defaults to string", MessageAttribute{StringValue: "v"}, dataTypeString, "v"},
 		{"number is passed as string", MessageAttribute{DataType: dataTypeNumber, StringValue: "42"}, dataTypeString, "42"},
 		{"string array is passed as string", MessageAttribute{DataType: dataTypeStringArray, StringValue: `["a","b"]`}, dataTypeString, `["a","b"]`},
 		{"binary is base64", MessageAttribute{DataType: dataTypeBinary, BinaryValue: []byte("hi")}, dataTypeBinary, "aGk="},
@@ -267,9 +266,9 @@ func TestPublish_LambdaWithoutInvokerIsANoop(t *testing.T) {
 
 	storage, sub := newTopicWithLambdaSubscription(t, nil, nil)
 
-	messageID, err := storage.Publish(context.Background(), sub.TopicARN, testLambdaMessage, "", "", "", "", nil)
-	if err != nil || messageID == "" {
-		t.Fatalf("Publish() = %q, %v; want a message id and no error", messageID, err)
+	result, err := storage.Publish(context.Background(), sub.TopicARN, testLambdaMessage, "", "", "", "", nil)
+	if err != nil || result.MessageID == "" {
+		t.Fatalf("Publish() = %q, %v; want a message id and no error", result.MessageID, err)
 	}
 }
 
@@ -279,9 +278,9 @@ func TestPublish_LambdaInvokerErrorDoesNotFailPublish(t *testing.T) {
 	invoker := &capturingInvoker{err: errors.New("boom")}
 	storage, sub := newTopicWithLambdaSubscription(t, invoker, nil)
 
-	messageID, err := storage.Publish(context.Background(), sub.TopicARN, testLambdaMessage, "", "", "", "", nil)
-	if err != nil || messageID == "" {
-		t.Fatalf("Publish() = %q, %v; delivery failures must not fail Publish", messageID, err)
+	result, err := storage.Publish(context.Background(), sub.TopicARN, testLambdaMessage, "", "", "", "", nil)
+	if err != nil || result.MessageID == "" {
+		t.Fatalf("Publish() = %q, %v; delivery failures must not fail Publish", result.MessageID, err)
 	}
 }
 

@@ -73,7 +73,7 @@ func TestPublish_RawDeliveryForwardsAttributes(t *testing.T) {
 		"traceId": {DataType: dataTypeString, StringValue: testTraceValueAbc},
 	}
 
-	messageID, err := storage.Publish(context.Background(), topicARN, "hello", "", "", "", "", attributes)
+	result, err := storage.Publish(context.Background(), topicARN, "hello", "", "", "", "", attributes)
 	if err != nil {
 		t.Fatalf("Publish() error = %v", err)
 	}
@@ -92,8 +92,8 @@ func TestPublish_RawDeliveryForwardsAttributes(t *testing.T) {
 		t.Fatalf("expected captured attrs to contain MessageId, got %v", publisher.attrs)
 	}
 
-	if msgIDAttr.StringValue != messageID {
-		t.Errorf("MessageId attribute StringValue = %q, want %q", msgIDAttr.StringValue, messageID)
+	if msgIDAttr.StringValue != result.MessageID {
+		t.Errorf("MessageId attribute StringValue = %q, want %q", msgIDAttr.StringValue, result.MessageID)
 	}
 }
 
@@ -163,12 +163,12 @@ func TestPublish_SubscriberErrorDoesNotFailPublish(t *testing.T) {
 	publisher := &capturingPublisher{err: errors.New("boom")}
 	storage, topicARN := newTopicWithSQSSubscription(t, publisher, map[string]string{subscriptionAttrRawMessageDelivery: testAttrValueTrue})
 
-	messageID, err := storage.Publish(context.Background(), topicARN, "hello", "", "", "", "", nil)
+	result, err := storage.Publish(context.Background(), topicARN, "hello", "", "", "", "", nil)
 	if err != nil {
 		t.Fatalf("Publish() error = %v, want nil (fire-and-forget contract)", err)
 	}
 
-	if messageID == "" {
-		t.Errorf("Publish() messageID = %q, want non-empty", messageID)
+	if result.MessageID == "" {
+		t.Errorf("Publish() messageID = %q, want non-empty", result.MessageID)
 	}
 }

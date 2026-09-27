@@ -290,6 +290,29 @@ var formToJSONTests = []struct {
 		},
 	},
 	{
+		name: "PublishBatch entries with nested attributes",
+		form: url.Values{
+			"PublishBatchRequestEntries.member.1.Id":                                          {"m1"},
+			"PublishBatchRequestEntries.member.1.Message":                                     {"hello"},
+			"PublishBatchRequestEntries.member.1.MessageAttributes.entry.1.Name":              {"kind"},
+			"PublishBatchRequestEntries.member.1.MessageAttributes.entry.1.Value.DataType":    {"String"},
+			"PublishBatchRequestEntries.member.1.MessageAttributes.entry.1.Value.StringValue": {"42"},
+			"PublishBatchRequestEntries.member.2.Id":                                          {"m2"},
+			"PublishBatchRequestEntries.member.2.Message":                                     {"world"},
+		},
+		want: map[string]any{
+			"PublishBatchRequestEntries": []any{
+				map[string]any{
+					"Id": "m1", "Message": "hello",
+					"MessageAttributes": map[string]any{
+						"kind": map[string]any{"DataType": "String", "StringValue": "42"},
+					},
+				},
+				map[string]any{"Id": "m2", "Message": "world"},
+			},
+		},
+	},
+	{
 		name: "Attributes.entry still works",
 		form: url.Values{
 			"Attributes.entry.1.key":   {"VisibilityTimeout"},

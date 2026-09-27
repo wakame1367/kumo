@@ -232,6 +232,10 @@ func formToJSON(form map[string][]string) []byte {
 	// Handle struct-list patterns like Tags.member.N.Key/Value.
 	result = flattenMemberStructs(result)
 
+	// Handle nested attributes inside batch entries
+	// (PublishBatchRequestEntries.member.N.MessageAttributes.entry.M.*).
+	result = flattenPublishBatchEntryAttributes(result)
+
 	// Handle nested attributes (like Attributes.entry.N.key/value).
 	result = flattenAttributes(result)
 
@@ -251,8 +255,13 @@ const messageAttributesPrefix = "MessageAttributes.entry."
 // are opaque strings ("42" or "true" must stay strings); every other single
 // value goes through parseFormValue and repeated values become a list.
 func assignFormValue(result map[string]any, key string, values []string) {
+	// Batch entries nest their attributes a level deeper:
+	// PublishBatchRequestEntries.member.N.MessageAttributes.entry.M.*.
+	isMessageAttr := strings.HasPrefix(key, messageAttributesPrefix) ||
+		strings.Contains(key, "."+messageAttributesPrefix)
+
 	switch {
-	case len(values) == 1 && strings.HasPrefix(key, messageAttributesPrefix):
+	case len(values) == 1 && isMessageAttr:
 		result[key] = values[0]
 	case len(values) == 1:
 		result[key] = parseFormValue(values[0])
@@ -358,6 +367,111 @@ func parseMemberStructKey(key string) (base string, index int, field string, ok 
 	}
 
 	return base, n, field, true
+}
+
+// publishBatchEntryPrefix is the Query-protocol prefix of SNS
+// PublishBatchRequestEntries members.
+const publishBatchEntryPrefix = "PublishBatchRequestEntries.member."
+
+// flattenPublishBatchEntryAttributes folds the MessageAttributes that sit
+// inside PublishBatch request entries into the entry objects produced by
+// flattenMemberStructs:
+//
+//	PublishBatchRequestEntries.member.1.MessageAttributes.entry.1.Name = k
+//	PublishBatchRequestEntries.member.1.MessageAttributes.entry.1.Value.DataType = String
+//
+// Entry members are sorted by their member index so the resulting map can be
+// attached to the matching element of the already-flattened entries list.
+func flattenPublishBatchEntryAttributes(data map[string]any) map[string]any {
+	pending := make(map[int]map[string]*messageAttributeEntry)
+	result := make(map[string]any)
+
+	for key, value := range data {
+		rest, ok := strings.CutPrefix(key, publishBatchEntryPrefix)
+		if !ok {
+			result[key] = value
+
+			continue
+		}
+
+		idxStr, field, hasField := strings.Cut(rest, ".")
+		if !hasField || !strings.HasPrefix(field, messageAttributesPrefix) {
+			result[key] = value
+
+			continue
+		}
+
+		memberIdx, err := strconv.Atoi(idxStr)
+		if err != nil {
+			result[key] = value
+
+			continue
+		}
+
+		attrRest := field[len(messageAttributesPrefix):]
+
+		attrIdx, attrField, hasAttrField := strings.Cut(attrRest, ".")
+		if !hasAttrField {
+			result[key] = value
+
+			continue
+		}
+
+		entries := pending[memberIdx]
+		if entries == nil {
+			entries = make(map[string]*messageAttributeEntry)
+			pending[memberIdx] = entries
+		}
+
+		entry, ok := entries[attrIdx]
+		if !ok {
+			entry = &messageAttributeEntry{}
+			entries[attrIdx] = entry
+		}
+
+		strValue, _ := value.(string)
+		entry.set(attrField, strValue)
+	}
+
+	if len(pending) == 0 {
+		return result
+	}
+
+	entries, ok := result["PublishBatchRequestEntries"].([]map[string]any)
+	if !ok {
+		return result
+	}
+
+	// flattenMemberStructs sorted members by index; the same ordering maps
+	// positions back to member indices.
+	sortedMemberIdx := make([]int, 0, len(pending))
+	for i := range pending {
+		sortedMemberIdx = append(sortedMemberIdx, i)
+	}
+
+	sort.Ints(sortedMemberIdx)
+
+	for _, memberIdx := range sortedMemberIdx {
+		msgAttrs := make(map[string]map[string]string, len(pending[memberIdx]))
+
+		for _, entry := range pending[memberIdx] {
+			if entry.name != "" {
+				msgAttrs[entry.name] = entry.attribute()
+			}
+		}
+
+		if len(msgAttrs) == 0 {
+			continue
+		}
+
+		if memberIdx-1 >= 0 && memberIdx-1 < len(entries) {
+			entries[memberIdx-1]["MessageAttributes"] = msgAttrs
+		}
+	}
+
+	result["PublishBatchRequestEntries"] = entries
+
+	return result
 }
 
 // flattenAttributes converts nested Query protocol attributes to JSON format.

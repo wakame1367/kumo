@@ -30,7 +30,7 @@ func TestCreateTopicAcceptsValidNames(t *testing.T) {
 
 	store := NewMemoryStorage("http://localhost:4566")
 
-	for _, name := range []string{"topic_name-1", "topic-name.fifo"} {
+	for _, name := range []string{"topic_name-1"} {
 		topic, err := store.CreateTopic(t.Context(), name, nil, nil)
 		if err != nil {
 			t.Fatalf("CreateTopic(%q): %v", name, err)
@@ -39,6 +39,16 @@ func TestCreateTopicAcceptsValidNames(t *testing.T) {
 		if topic.Name != name {
 			t.Fatalf("CreateTopic(%q) name = %q", name, topic.Name)
 		}
+	}
+
+	// A .fifo name is only valid together with the FifoTopic attribute.
+	topic, err := store.CreateTopic(t.Context(), "topic-name.fifo", map[string]string{"FifoTopic": "true"}, nil)
+	if err != nil {
+		t.Fatalf("CreateTopic(fifo): %v", err)
+	}
+
+	if topic.Name != "topic-name.fifo" || !topic.Fifo {
+		t.Fatalf("CreateTopic(fifo) = %+v", topic)
 	}
 }
 

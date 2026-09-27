@@ -4,6 +4,7 @@ import (
 	"encoding/xml"
 	"errors"
 	"net/http"
+	"regexp"
 	"strings"
 
 	"github.com/google/uuid"
@@ -19,7 +20,18 @@ const (
 	errInvalidParameter     = "InvalidParameter"
 	errInternalServiceError = "InternalError"
 	errInvalidAction        = "InvalidAction"
+
+	// PublishBatch request-level error codes.
+	errEmptyBatch       = "EmptyBatchRequest"
+	errTooManyEntries   = "TooManyEntriesInBatchRequest"
+	errIDsNotDistinct   = "BatchEntryIdsNotDistinct"
+	errInvalidBatchID   = "InvalidBatchEntryId"
+	maxBatchEntries     = 10
+	batchEntryIDPattern = `^[0-9A-Za-z_-]{1,80}$`
 )
+
+// batchEntryIDRe matches the characters SNS allows in a batch entry Id.
+var batchEntryIDRe = regexp.MustCompile(batchEntryIDPattern)
 
 // CreateTopic handles the CreateTopic action.
 func (s *Service) CreateTopic(w http.ResponseWriter, r *http.Request) {
@@ -181,9 +193,68 @@ func (s *Service) Subscribe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// SNS answers "pending confirmation" instead of the subscription ARN
+	// for protocols that still need ConfirmSubscription, unless the caller
+	// opted into the real ARN with ReturnSubscriptionArn.
+	subscriptionARN := subscription.ARN
+	if !subscription.Confirmed && !req.ReturnSubscriptionArn {
+		subscriptionARN = "pending confirmation"
+	}
+
 	writeXMLResponse(w, XMLSubscribeResponse{
 		Xmlns: snsXMLNS,
 		SubscribeResult: XMLSubscribeResult{
+			SubscriptionArn: subscriptionARN,
+		},
+		ResponseMetadata: ResponseMetadata{
+			RequestID: uuid.New().String(),
+		},
+	})
+}
+
+// ConfirmSubscription handles the ConfirmSubscription action.
+func (s *Service) ConfirmSubscription(w http.ResponseWriter, r *http.Request) {
+	var req ConfirmSubscriptionRequest
+	if err := service.ReadJSONRequest(r, &req); err != nil {
+		writeTopicError(w, errInvalidParameter, "Failed to parse request body", http.StatusBadRequest)
+
+		return
+	}
+
+	if req.TopicArn == "" {
+		writeTopicError(w, errInvalidParameter, "TopicArn is required", http.StatusBadRequest)
+
+		return
+	}
+
+	if req.Token == "" {
+		writeTopicError(w, errInvalidParameter, "Token is required", http.StatusBadRequest)
+
+		return
+	}
+
+	subscription, err := s.storage.ConfirmSubscription(r.Context(), req.TopicArn, req.Token)
+	if err != nil {
+		var sErr *TopicError
+		if errors.As(err, &sErr) {
+			status := http.StatusBadRequest
+			if sErr.Code == errNotFound {
+				status = http.StatusNotFound
+			}
+
+			writeTopicError(w, sErr.Code, sErr.Message, status)
+
+			return
+		}
+
+		writeTopicError(w, errInternalServiceError, "Internal server error", http.StatusInternalServerError)
+
+		return
+	}
+
+	writeXMLResponse(w, XMLConfirmSubscriptionResponse{
+		Xmlns: snsXMLNS,
+		ConfirmSubscriptionResult: XMLConfirmSubscriptionResult{
 			SubscriptionArn: subscription.ARN,
 		},
 		ResponseMetadata: ResponseMetadata{
@@ -261,7 +332,7 @@ func (s *Service) Publish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	messageID, err := s.storage.Publish(r.Context(), topicARN, req.Message, req.MessageStructure, req.Subject, req.MessageGroupID, req.MessageDeduplicationID, req.MessageAttributes)
+	result, err := s.storage.Publish(r.Context(), topicARN, req.Message, req.MessageStructure, req.Subject, req.MessageGroupID, req.MessageDeduplicationID, req.MessageAttributes)
 	if err != nil {
 		var sErr *TopicError
 		if errors.As(err, &sErr) {
@@ -283,7 +354,104 @@ func (s *Service) Publish(w http.ResponseWriter, r *http.Request) {
 	writeXMLResponse(w, XMLPublishResponse{
 		Xmlns: snsXMLNS,
 		PublishResult: XMLPublishResult{
-			MessageID: messageID,
+			MessageID:      result.MessageID,
+			SequenceNumber: result.SequenceNumber,
+		},
+		ResponseMetadata: ResponseMetadata{
+			RequestID: uuid.New().String(),
+		},
+	})
+}
+
+// PublishBatch handles the PublishBatch action.
+func (s *Service) PublishBatch(w http.ResponseWriter, r *http.Request) {
+	var req PublishBatchRequest
+	if err := service.ReadJSONRequest(r, &req); err != nil {
+		writeTopicError(w, errInvalidParameter, "Failed to parse request body", http.StatusBadRequest)
+
+		return
+	}
+
+	if req.TopicARN == "" {
+		writeTopicError(w, errInvalidParameter, "TopicArn is required", http.StatusBadRequest)
+
+		return
+	}
+
+	switch {
+	case len(req.PublishBatchRequestEntries) == 0:
+		writeTopicError(w, errEmptyBatch, "The batch request doesn't contain any entries.", http.StatusBadRequest)
+
+		return
+	case len(req.PublishBatchRequestEntries) > maxBatchEntries:
+		writeTopicError(w, errTooManyEntries, "The batch request contains more entries than permissible.", http.StatusBadRequest)
+
+		return
+	}
+
+	seen := make(map[string]bool, len(req.PublishBatchRequestEntries))
+
+	for _, entry := range req.PublishBatchRequestEntries {
+		if !batchEntryIDRe.MatchString(entry.ID) {
+			writeTopicError(w, errInvalidBatchID, "A batch entry id can only contain alphanumeric characters, hyphens and underscores. It can be at most 80 letters long.", http.StatusBadRequest)
+
+			return
+		}
+
+		if seen[entry.ID] {
+			writeTopicError(w, errIDsNotDistinct, "Two or more batch entries in the request have the same Id.", http.StatusBadRequest)
+
+			return
+		}
+
+		seen[entry.ID] = true
+	}
+
+	// A missing topic fails the whole request rather than each entry.
+	if _, err := s.storage.GetTopic(r.Context(), req.TopicARN); err != nil {
+		var sErr *TopicError
+		if errors.As(err, &sErr) {
+			writeTopicError(w, sErr.Code, sErr.Message, http.StatusNotFound)
+
+			return
+		}
+
+		writeTopicError(w, errInternalServiceError, "Internal server error", http.StatusInternalServerError)
+
+		return
+	}
+
+	successful := XMLSuccessfulEntries{Member: []XMLPublishBatchResultEntry{}}
+	failed := XMLFailedEntries{Member: []XMLBatchResultErrorEntry{}}
+
+	for _, entry := range req.PublishBatchRequestEntries {
+		result, err := s.storage.Publish(r.Context(), req.TopicARN, entry.Message, entry.MessageStructure,
+			entry.Subject, entry.MessageGroupID, entry.MessageDeduplicationID, entry.MessageAttributes)
+		if err != nil {
+			code, message, senderFault := errInternalServiceError, "Internal server error", false
+
+			var sErr *TopicError
+			if errors.As(err, &sErr) {
+				code, message, senderFault = sErr.Code, sErr.Message, true
+			}
+
+			failed.Member = append(failed.Member, XMLBatchResultErrorEntry{
+				ID: entry.ID, Code: code, Message: message, SenderFault: senderFault,
+			})
+
+			continue
+		}
+
+		successful.Member = append(successful.Member, XMLPublishBatchResultEntry{
+			ID: entry.ID, MessageID: result.MessageID, SequenceNumber: result.SequenceNumber,
+		})
+	}
+
+	writeXMLResponse(w, XMLPublishBatchResponse{
+		Xmlns: snsXMLNS,
+		PublishBatchResult: XMLPublishBatchResult{
+			Successful: successful,
+			Failed:     failed,
 		},
 		ResponseMetadata: ResponseMetadata{
 			RequestID: uuid.New().String(),
@@ -425,8 +593,10 @@ func (s *Service) actionHandlers() map[string]func(http.ResponseWriter, *http.Re
 		"DeleteTopic":               s.DeleteTopic,
 		"ListTopics":                s.ListTopics,
 		"Subscribe":                 s.Subscribe,
+		"ConfirmSubscription":       s.ConfirmSubscription,
 		"Unsubscribe":               s.Unsubscribe,
 		"Publish":                   s.Publish,
+		"PublishBatch":              s.PublishBatch,
 		"ListSubscriptions":         s.ListSubscriptions,
 		"ListSubscriptionsByTopic":  s.ListSubscriptionsByTopic,
 		"GetSubscriptionAttributes": s.GetSubscriptionAttributes,
