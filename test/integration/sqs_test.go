@@ -862,6 +862,8 @@ func TestSQS_VisibilityTimeoutRedelivery(t *testing.T) {
 	recvOutput3, err := client.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{
 		QueueUrl:            createOutput.QueueUrl,
 		MaxNumberOfMessages: 1,
+		// SQS returns system attributes only when requested.
+		AttributeNames: []types.MessageSystemAttributeName{types.MessageSystemAttributeNameAll},
 	})
 	if err != nil {
 		t.Fatal(err)

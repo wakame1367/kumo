@@ -26,6 +26,20 @@ type Queue struct {
 	DeadLetterTargetArn       string // Parsed from RedrivePolicy
 }
 
+// MessageMoveTask records one StartMessageMoveTask operation for
+// ListMessageMoveTasks/CancelMessageMoveTask.
+type MessageMoveTask struct {
+	TaskHandle                        string
+	Status                            string
+	SourceARN                         string
+	DestinationARN                    string
+	FailureReason                     string
+	MaxNumberOfMessagesPerSecond      int64
+	ApproximateNumberOfMessagesMoved  int64
+	ApproximateNumberOfMessagesToMove int64
+	StartedTimestamp                  time.Time
+}
+
 // Message represents an SQS message.
 type Message struct {
 	MessageID              string
@@ -281,6 +295,64 @@ type ChangeMessageVisibilityBatchResponse struct {
 // ChangeMessageVisibilityBatchResultEntry is a successful entry.
 type ChangeMessageVisibilityBatchResultEntry struct {
 	ID string `json:"Id"`
+}
+
+// ListDeadLetterSourceQueuesRequest is the request for ListDeadLetterSourceQueues.
+type ListDeadLetterSourceQueuesRequest struct {
+	QueueURL   string `json:"QueueUrl"`
+	NextToken  string `json:"NextToken,omitempty"`
+	MaxResults int    `json:"MaxResults,omitempty"`
+}
+
+// ListDeadLetterSourceQueuesResponse is the response for ListDeadLetterSourceQueues.
+type ListDeadLetterSourceQueuesResponse struct {
+	QueueURLs []string `json:"queueUrls"`
+}
+
+// StartMessageMoveTaskRequest is the request for StartMessageMoveTask.
+type StartMessageMoveTaskRequest struct {
+	SourceARN                    string `json:"SourceArn"`
+	DestinationARN               string `json:"DestinationArn,omitempty"`
+	MaxNumberOfMessagesPerSecond int64  `json:"MaxNumberOfMessagesPerSecond,omitempty"`
+}
+
+// StartMessageMoveTaskResponse is the response for StartMessageMoveTask.
+type StartMessageMoveTaskResponse struct {
+	TaskHandle string `json:"TaskHandle"`
+}
+
+// ListMessageMoveTasksRequest is the request for ListMessageMoveTasks.
+type ListMessageMoveTasksRequest struct {
+	SourceARN  string `json:"SourceArn"`
+	MaxResults int    `json:"MaxResults,omitempty"`
+}
+
+// MessageMoveTaskResultEntry is one ListMessageMoveTasks result.
+type MessageMoveTaskResultEntry struct {
+	TaskHandle                        string  `json:"TaskHandle"`
+	Status                            string  `json:"Status"`
+	SourceARN                         string  `json:"SourceArn"`
+	DestinationARN                    string  `json:"DestinationArn"`
+	FailureReason                     string  `json:"FailureReason,omitempty"`
+	ApproximateNumberOfMessagesMoved  int64   `json:"ApproximateNumberOfMessagesMoved"`
+	ApproximateNumberOfMessagesToMove int64   `json:"ApproximateNumberOfMessagesToMove"`
+	MaxNumberOfMessagesPerSecond      int64   `json:"MaxNumberOfMessagesPerSecond,omitempty"`
+	StartedTimestamp                  float64 `json:"StartedTimestamp"`
+}
+
+// ListMessageMoveTasksResponse is the response for ListMessageMoveTasks.
+type ListMessageMoveTasksResponse struct {
+	Results []MessageMoveTaskResultEntry `json:"Results"`
+}
+
+// CancelMessageMoveTaskRequest is the request for CancelMessageMoveTask.
+type CancelMessageMoveTaskRequest struct {
+	TaskHandle string `json:"TaskHandle"`
+}
+
+// CancelMessageMoveTaskResponse is the response for CancelMessageMoveTask.
+type CancelMessageMoveTaskResponse struct {
+	TaskHandle string `json:"TaskHandle"`
 }
 
 // ErrorResponse represents an SQS error response in JSON format.
