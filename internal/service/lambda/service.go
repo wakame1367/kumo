@@ -41,12 +41,25 @@ type Service struct {
 
 // New creates a new Lambda service.
 func New(storage Storage, baseURL string) *Service {
-	return &Service{
+	s := &Service{
 		storage: storage,
 		baseURL: baseURL,
 		broker:  newRuntimeBroker(),
 		async:   newAsyncDispatcher(),
 	}
+
+	// Let async invocations honor each function's
+	// FunctionEventInvokeConfig (retry count, maximum event age).
+	s.async.invokeConfigOf = func(name string) *FunctionEventInvokeConfig {
+		cfg, err := storage.GetFunctionEventInvokeConfig(context.Background(), name)
+		if err != nil {
+			return nil
+		}
+
+		return cfg
+	}
+
+	return s
 }
 
 // Name returns the service name.
@@ -84,7 +97,12 @@ func (s *Service) RegisterRoutes(r service.Router) {
 		r.Handle("POST", prefix+"/2015-03-31/functions/{functionName}/policy", s.AddPermission)
 		r.Handle("DELETE", prefix+"/2015-03-31/functions/{functionName}/policy/{statementId}", s.RemovePermission)
 		r.Handle("GET", prefix+"/2020-06-30/functions/{functionName}/code-signing-config", s.GetFunctionCodeSigningConfig)
+		r.Handle("PUT", prefix+"/2019-09-25/functions/{functionName}/event-invoke-config", s.PutFunctionEventInvokeConfig)
+		r.Handle("POST", prefix+"/2019-09-25/functions/{functionName}/event-invoke-config", s.PutFunctionEventInvokeConfig)
+		r.Handle("GET", prefix+"/2019-09-25/functions/{functionName}/event-invoke-config", s.GetFunctionEventInvokeConfig)
+		r.Handle("DELETE", prefix+"/2019-09-25/functions/{functionName}/event-invoke-config", s.DeleteFunctionEventInvokeConfig)
 		r.Handle("GET", prefix+"/2019-09-25/functions/{functionName}/event-invoke-config/list", s.ListFunctionEventInvokeConfigs)
+		r.Handle("POST", prefix+"/2019-09-25/functions/{functionName}/event-invoke-config/list", s.ListFunctionEventInvokeConfigs)
 		r.Handle("GET", prefix+"/2017-03-31/tags/{arn...}", s.ListTags)
 		r.Handle("POST", prefix+"/2017-03-31/tags/{arn...}", s.TagResource)
 		r.Handle("DELETE", prefix+"/2017-03-31/tags/{arn...}", s.UntagResource)
