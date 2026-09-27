@@ -15,6 +15,18 @@ type Topic struct {
 	CreatedTime   time.Time
 	Attributes    map[string]string
 	Subscriptions map[string]*Subscription
+	// Fifo marks a FIFO topic (created with FifoTopic=true and a .fifo
+	// name). SequenceCounter is the per-topic source of the SequenceNumber
+	// Publish returns for FIFO topics.
+	Fifo            bool
+	SequenceCounter uint64
+}
+
+// PublishResult is what Publish returns: the assigned MessageId and, for
+// FIFO topics, the per-topic SequenceNumber.
+type PublishResult struct {
+	MessageID      string
+	SequenceNumber string
 }
 
 // Subscription represents an SNS subscription.

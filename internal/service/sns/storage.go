@@ -2,6 +2,8 @@ package sns
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -31,6 +33,14 @@ const (
 	signingCertURLPlaceholder = "https://sns.us-east-1.amazonaws.com/SimpleNotificationService-0000000000000000000000.pem"
 
 	subscriptionAttrRawMessageDelivery = "RawMessageDelivery"
+
+	topicAttrFifoTopic                = "FifoTopic"
+	topicAttrDisplayName              = "DisplayName"
+	subscriptionAttrFilterPolicy      = "FilterPolicy"
+	subscriptionAttrFilterPolicyScope = "FilterPolicyScope"
+	snsFieldTopicArn                  = "TopicArn"
+	snsAttrValueTrue                  = "true"
+	snsPlaceholderSignature           = "EXAMPLE"
 )
 
 // SQSPublisher is an interface for publishing messages to SQS.
@@ -56,7 +66,7 @@ type Storage interface {
 	GetSubscription(ctx context.Context, subscriptionARN string) (*Subscription, error)
 	SetSubscriptionAttribute(ctx context.Context, subscriptionARN, name, value string) error
 	Unsubscribe(ctx context.Context, subscriptionARN string) error
-	Publish(ctx context.Context, topicARN, message, messageStructure, subject, messageGroupID, messageDeduplicationID string, attributes map[string]MessageAttribute) (string, error)
+	Publish(ctx context.Context, topicARN, message, messageStructure, subject, messageGroupID, messageDeduplicationID string, attributes map[string]MessageAttribute) (*PublishResult, error)
 	ListSubscriptions(ctx context.Context, nextToken string) ([]*Subscription, string, error)
 	ListSubscriptionsByTopic(ctx context.Context, topicARN, nextToken string) ([]*Subscription, string, error)
 	ListTagsForResource(ctx context.Context, resourceArn string) ([]Tag, error)
@@ -80,6 +90,19 @@ var (
 	_ json.Unmarshaler = (*MemoryStorage)(nil)
 )
 
+// fifoDedupEntry records one accepted deduplication ID on a FIFO topic.
+// A Publish that repeats the ID inside the 5-minute deduplication window
+// is acknowledged with the original MessageId and SequenceNumber but is
+// not delivered again.
+type fifoDedupEntry struct {
+	MessageID      string
+	SequenceNumber string
+	ExpiresAt      time.Time
+}
+
+// fifoDedupWindow is the interval SNS uses for FIFO deduplication.
+const fifoDedupWindow = 5 * time.Minute
+
 // MemoryStorage implements Storage with in-memory data.
 type MemoryStorage struct {
 	mu            sync.RWMutex             `json:"-"`
@@ -90,6 +113,10 @@ type MemoryStorage struct {
 	SqsPublisher  SQSPublisher `json:"-"`
 	lambdaInvoker LambdaInvoker
 	dataDir       string
+	// fifoDedup holds the per-topic deduplication window, keyed by topic
+	// ARN then by deduplication ID. Not persisted: like SQS's
+	// DeduplicationCache it is a best-effort delivery detail.
+	fifoDedup map[string]map[string]fifoDedupEntry `json:"-"`
 }
 
 // NewMemoryStorage creates a new in-memory SNS storage.
@@ -99,6 +126,7 @@ func NewMemoryStorage(baseURL string, opts ...Option) *MemoryStorage {
 		Subscriptions: make(map[string]*Subscription),
 		Tags:          make(map[string][]Tag),
 		baseURL:       baseURL,
+		fifoDedup:     make(map[string]map[string]fifoDedupEntry),
 	}
 	for _, o := range opts {
 		o(s)
@@ -151,6 +179,10 @@ func (m *MemoryStorage) UnmarshalJSON(data []byte) error {
 		m.Tags = make(map[string][]Tag)
 	}
 
+	if m.fifoDedup == nil {
+		m.fifoDedup = make(map[string]map[string]fifoDedupEntry)
+	}
+
 	return nil
 }
 
@@ -188,6 +220,8 @@ func (m *MemoryStorage) SetLambdaInvoker(invoker LambdaInvoker) {
 }
 
 // CreateTopic creates a new topic.
+//
+//nolint:funlen // sequential AWS parity checks for name/attributes/tags
 func (m *MemoryStorage) CreateTopic(_ context.Context, name string, attributes map[string]string, tags []Tag) (*Topic, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -199,10 +233,49 @@ func (m *MemoryStorage) CreateTopic(_ context.Context, name string, attributes m
 		}
 	}
 
+	fifo := strings.EqualFold(attributes[topicAttrFifoTopic], snsAttrValueTrue)
+
+	// The topic type and the name must agree: a FIFO topic name ends in
+	// .fifo, and the .fifo suffix is reserved for FIFO topics. AWS reports
+	// both mismatches as "Invalid parameter: Topic Name".
+	if fifo != strings.HasSuffix(name, ".fifo") {
+		return nil, &TopicError{
+			Code:    errInvalidParameter,
+			Message: "Invalid parameter: Topic Name",
+		}
+	}
+
 	arn := m.buildTopicARN(name)
 
 	if topic, exists := m.Topics[arn]; exists {
+		// CreateTopic is idempotent on the name, but AWS rejects a repeat
+		// create when the attributes or tags differ from the stored ones.
+		if !attributesMatchExisting(topic, attributes) {
+			return nil, &TopicError{
+				Code:    errInvalidParameter,
+				Message: "Invalid parameter: Attributes Reason: Topic already exists with different attributes",
+			}
+		}
+
+		if !tagsMatchExisting(m.Tags[arn], tags) {
+			return nil, &TopicError{
+				Code:    errInvalidParameter,
+				Message: "Invalid parameter: Tags Reason: Topic already exists with different tags",
+			}
+		}
+
 		return topic, nil
+	}
+
+	if fifo {
+		if attributes == nil {
+			attributes = make(map[string]string)
+		}
+
+		attributes[topicAttrFifoTopic] = snsAttrValueTrue
+	} else {
+		// AWS does not store an explicit FifoTopic=false.
+		delete(attributes, topicAttrFifoTopic)
 	}
 
 	topic := &Topic{
@@ -211,6 +284,7 @@ func (m *MemoryStorage) CreateTopic(_ context.Context, name string, attributes m
 		CreatedTime:   time.Now(),
 		Attributes:    attributes,
 		Subscriptions: make(map[string]*Subscription),
+		Fifo:          fifo,
 	}
 
 	if len(tags) > 0 {
@@ -260,13 +334,19 @@ func (m *MemoryStorage) SetTopicAttribute(_ context.Context, topicARN, name, val
 		return &TopicError{Code: errNotFound, Message: "Topic does not exist: " + topicARN}
 	}
 
+	// The topic type is immutable: AWS rejects SetTopicAttributes on
+	// FifoTopic outright.
+	if name == topicAttrFifoTopic {
+		return &TopicError{Code: errInvalidParameter, Message: "Invalid parameter: AttributeName"}
+	}
+
 	if topic.Attributes == nil {
 		topic.Attributes = make(map[string]string)
 	}
 
 	topic.Attributes[name] = value
 
-	if name == "DisplayName" {
+	if name == topicAttrDisplayName {
 		topic.DisplayName = value
 	}
 
@@ -294,6 +374,7 @@ func (m *MemoryStorage) DeleteTopic(_ context.Context, topicARN string) error {
 
 	delete(m.Topics, topicARN)
 	delete(m.Tags, topicARN)
+	delete(m.fifoDedup, topicARN)
 
 	m.saveLocked()
 
@@ -422,6 +503,8 @@ func (m *MemoryStorage) ListTopics(_ context.Context, nextToken string) ([]*Topi
 }
 
 // Subscribe creates a subscription.
+//
+//nolint:funlen // subscribe handles protocol-specific validation and setup
 func (m *MemoryStorage) Subscribe(_ context.Context, topicARN, protocol, endpoint string, attributes map[string]string) (*Subscription, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -447,7 +530,31 @@ func (m *MemoryStorage) Subscribe(_ context.Context, topicARN, protocol, endpoin
 		}
 	}
 
+	// FIFO pairing rules: a FIFO topic accepts only sqs subscriptions (any
+	// queue type), and a FIFO queue endpoint cannot hang off a standard
+	// topic. Messages taken from AWS's recorded responses.
+	if topic.Fifo && protocol != protocolSQS {
+		return nil, &TopicError{
+			Code:    errInvalidParameter,
+			Message: fmt.Sprintf("Invalid parameter: Protocol %s is not supported for FIFO topics", protocol),
+		}
+	}
+
+	if !topic.Fifo && protocol == protocolSQS && isFIFOName(endpoint) {
+		return nil, &TopicError{
+			Code:    errInvalidParameter,
+			Message: "Invalid parameter: Invalid parameter: Endpoint Reason: FIFO SQS Queues can not be subscribed to standard SNS topics",
+		}
+	}
+
 	subscriptionARN := m.buildSubscriptionARN(topicARN)
+
+	if endpoint == "" {
+		return nil, &TopicError{
+			Code:    errInvalidParameter,
+			Message: "Invalid parameter: Endpoint",
+		}
+	}
 
 	subscription := &Subscription{
 		ARN:                    subscriptionARN,
@@ -537,12 +644,40 @@ func (m *MemoryStorage) Unsubscribe(_ context.Context, subscriptionARN string) e
 
 // Publish publishes a message to a topic.
 // Publish fans a message out to the topic's subscribers. Like SNS, it
-// validates a json-structured body before it looks the topic up, so a
-// malformed body is reported even when the topic does not exist.
-func (m *MemoryStorage) Publish(ctx context.Context, topicARN, message, messageStructure, subject, messageGroupID, messageDeduplicationID string, attributes map[string]MessageAttribute) (string, error) {
+// validates a json-structured body and the FIFO-only parameters before it
+// looks the topic up, so a malformed body is reported even when the topic
+// does not exist.
+//
+//nolint:cyclop,funlen // publish validation and FIFO handling follow AWS's sequential checks
+func (m *MemoryStorage) Publish(ctx context.Context, topicARN, message, messageStructure, subject, messageGroupID, messageDeduplicationID string, attributes map[string]MessageAttribute) (*PublishResult, error) {
 	messages, err := messagesForStructure(message, messageStructure)
 	if err != nil {
-		return "", err
+		return nil, err
+	}
+
+	if err := validatePublishMessageAttributes(message, attributes); err != nil {
+		return nil, err
+	}
+
+	fifo := isFIFOName(topicARN)
+
+	// FIFO-only parameter checks precede the topic lookup, as on SNS: a
+	// missing MessageGroupId on a .fifo ARN is InvalidParameter even when
+	// the topic does not exist, and a stray MessageDeduplicationId on a
+	// standard ARN fails before the lookup too. A bare MessageGroupId on a
+	// standard topic is accepted — SNS forwards it to standard SQS
+	// subscriptions for fair queues.
+	switch {
+	case fifo && messageGroupID == "":
+		return nil, &TopicError{
+			Code:    errInvalidParameter,
+			Message: "Invalid parameter: The MessageGroupId parameter is required for FIFO topics",
+		}
+	case !fifo && messageDeduplicationID != "":
+		return nil, &TopicError{
+			Code:    errInvalidParameter,
+			Message: "Invalid parameter: MessageDeduplicationId Reason: The request includes MessageDeduplicationId parameter that is not valid for this topic type",
+		}
 	}
 
 	m.mu.RLock()
@@ -551,7 +686,7 @@ func (m *MemoryStorage) Publish(ctx context.Context, topicARN, message, messageS
 	if !exists {
 		m.mu.RUnlock()
 
-		return "", &TopicError{
+		return nil, &TopicError{
 			Code:    errNotFound,
 			Message: fmt.Sprintf("Topic does not exist: %s", topicARN),
 		}
@@ -565,6 +700,60 @@ func (m *MemoryStorage) Publish(ctx context.Context, topicARN, message, messageS
 	m.mu.RUnlock()
 
 	messageID := uuid.New().String()
+
+	var sequenceNumber string
+
+	//nolint:nestif // FIFO dedup bookkeeping mirrors the AWS publish flow
+	if fifo {
+		// MessageDeduplicationId falls back to ContentBasedDeduplication
+		// (sha256 of the raw message) the way SNS does; the resolved ID is
+		// what SQS FIFO subscribers receive so the queue dedupes too.
+		if messageDeduplicationID == "" {
+			if topic.Attributes["ContentBasedDeduplication"] != snsAttrValueTrue {
+				return nil, &TopicError{
+					Code:    errInvalidParameter,
+					Message: "Invalid parameter: The topic should either have ContentBasedDeduplication enabled or MessageDeduplicationId provided explicitly",
+				}
+			}
+
+			sum := sha256.Sum256([]byte(message))
+			messageDeduplicationID = hex.EncodeToString(sum[:])
+		}
+
+		m.mu.Lock()
+
+		window := m.fifoDedup[topicARN]
+		if window == nil {
+			window = make(map[string]fifoDedupEntry)
+			m.fifoDedup[topicARN] = window
+		}
+
+		now := time.Now()
+
+		for id, entry := range window {
+			if now.After(entry.ExpiresAt) {
+				delete(window, id)
+			}
+		}
+
+		if entry, duplicate := window[messageDeduplicationID]; duplicate {
+			m.mu.Unlock()
+
+			// Acknowledge the repeat with the original identifiers and
+			// deliver nothing, the way SNS suppresses the duplicate.
+			return &PublishResult{MessageID: entry.MessageID, SequenceNumber: entry.SequenceNumber}, nil
+		}
+
+		topic.SequenceCounter++
+		sequenceNumber = fmt.Sprintf("%d", topic.SequenceCounter)
+		window[messageDeduplicationID] = fifoDedupEntry{
+			MessageID:      messageID,
+			SequenceNumber: sequenceNumber,
+			ExpiresAt:      now.Add(fifoDedupWindow),
+		}
+
+		m.mu.Unlock()
+	}
 
 	// Deliver to all subscriptions.
 	for _, sub := range subscriptions {
@@ -580,7 +769,7 @@ func (m *MemoryStorage) Publish(ctx context.Context, topicARN, message, messageS
 		}
 	}
 
-	return messageID, nil
+	return &PublishResult{MessageID: messageID, SequenceNumber: sequenceNumber}, nil
 }
 
 // matchesFilterPolicy checks whether the given message attributes satisfy the
@@ -971,6 +1160,53 @@ func (m *MemoryStorage) ListSubscriptionsByTopic(_ context.Context, topicARN, ne
 
 func isValidTopicName(name string) bool {
 	return awsname.IsValidMessagingResource(name, 256)
+}
+
+// isFIFOName reports whether a topic name or ARN carries the .fifo marker.
+// A substring check matches SNS's own test: endpoints like
+// arn:aws:sqs:us-east-1:000000000000:q.fifo are detected the same way.
+func isFIFOName(nameOrARN string) bool {
+	return strings.Contains(nameOrARN, ".fifo")
+}
+
+// attributesMatchExisting reports whether every requested attribute already
+// exists on the topic with the same value; it is the "topic already exists
+// with different attributes" check AWS applies to a repeated CreateTopic.
+// An explicit FifoTopic=false counts as unset because AWS does not store it.
+func attributesMatchExisting(topic *Topic, requested map[string]string) bool {
+	for k, v := range requested {
+		if k == topicAttrFifoTopic && v == "false" && topic.Attributes[topicAttrFifoTopic] == "" {
+			continue
+		}
+
+		if existing, ok := topic.Attributes[k]; !ok || existing != v {
+			return false
+		}
+	}
+
+	return true
+}
+
+// tagsMatchExisting reports whether every requested tag is already present on
+// the topic's tag list; AWS fails a repeated CreateTopic whose Tags differ.
+func tagsMatchExisting(existing, requested []Tag) bool {
+	for _, req := range requested {
+		found := false
+
+		for _, have := range existing {
+			if have == req {
+				found = true
+
+				break
+			}
+		}
+
+		if !found {
+			return false
+		}
+	}
+
+	return true
 }
 
 // buildTopicARN builds an ARN for a topic.

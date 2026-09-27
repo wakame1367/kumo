@@ -261,7 +261,7 @@ func (s *Service) Publish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	messageID, err := s.storage.Publish(r.Context(), topicARN, req.Message, req.MessageStructure, req.Subject, req.MessageGroupID, req.MessageDeduplicationID, req.MessageAttributes)
+	result, err := s.storage.Publish(r.Context(), topicARN, req.Message, req.MessageStructure, req.Subject, req.MessageGroupID, req.MessageDeduplicationID, req.MessageAttributes)
 	if err != nil {
 		var sErr *TopicError
 		if errors.As(err, &sErr) {
@@ -283,7 +283,8 @@ func (s *Service) Publish(w http.ResponseWriter, r *http.Request) {
 	writeXMLResponse(w, XMLPublishResponse{
 		Xmlns: snsXMLNS,
 		PublishResult: XMLPublishResult{
-			MessageID: messageID,
+			MessageID:      result.MessageID,
+			SequenceNumber: result.SequenceNumber,
 		},
 		ResponseMetadata: ResponseMetadata{
 			RequestID: uuid.New().String(),

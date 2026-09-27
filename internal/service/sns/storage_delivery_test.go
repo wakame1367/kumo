@@ -10,6 +10,7 @@ import (
 
 const (
 	testAttrValueTrue = "true"
+	testHelloMessage  = "hello"
 	testTraceValueAbc = "abc"
 )
 
@@ -73,7 +74,7 @@ func TestPublish_RawDeliveryForwardsAttributes(t *testing.T) {
 		"traceId": {DataType: dataTypeString, StringValue: testTraceValueAbc},
 	}
 
-	messageID, err := storage.Publish(context.Background(), topicARN, "hello", "", "", "", "", attributes)
+	result, err := storage.Publish(context.Background(), topicARN, "hello", "", "", "", "", attributes)
 	if err != nil {
 		t.Fatalf("Publish() error = %v", err)
 	}
@@ -92,8 +93,8 @@ func TestPublish_RawDeliveryForwardsAttributes(t *testing.T) {
 		t.Fatalf("expected captured attrs to contain MessageId, got %v", publisher.attrs)
 	}
 
-	if msgIDAttr.StringValue != messageID {
-		t.Errorf("MessageId attribute StringValue = %q, want %q", msgIDAttr.StringValue, messageID)
+	if msgIDAttr.StringValue != result.MessageID {
+		t.Errorf("MessageId attribute StringValue = %q, want %q", msgIDAttr.StringValue, result.MessageID)
 	}
 }
 
@@ -104,8 +105,8 @@ func TestPublish_RawDeliveryPreservesTypedAttributes(t *testing.T) {
 	storage, topicARN := newTopicWithSQSSubscription(t, publisher, map[string]string{subscriptionAttrRawMessageDelivery: testAttrValueTrue})
 
 	attributes := map[string]MessageAttribute{
-		"count": {DataType: "Number", StringValue: "42"},
-		"blob":  {DataType: "Binary", BinaryValue: []byte{1, 2}},
+		"count": {DataType: dataTypeNumber, StringValue: "42"},
+		"blob":  {DataType: dataTypeBinary, BinaryValue: []byte{1, 2}},
 	}
 
 	_, err := storage.Publish(context.Background(), topicARN, "hello", "", "", "", "", attributes)
@@ -118,7 +119,7 @@ func TestPublish_RawDeliveryPreservesTypedAttributes(t *testing.T) {
 		t.Fatalf("expected captured attrs to contain count, got %v", publisher.attrs)
 	}
 
-	if count.DataType != "Number" || count.StringValue != "42" {
+	if count.DataType != dataTypeNumber || count.StringValue != "42" {
 		t.Errorf("count attribute = %+v, want DataType=Number StringValue=42", count)
 	}
 
@@ -127,7 +128,7 @@ func TestPublish_RawDeliveryPreservesTypedAttributes(t *testing.T) {
 		t.Fatalf("expected captured attrs to contain blob, got %v", publisher.attrs)
 	}
 
-	if blob.DataType != "Binary" || !bytes.Equal(blob.BinaryValue, []byte{1, 2}) {
+	if blob.DataType != dataTypeBinary || !bytes.Equal(blob.BinaryValue, []byte{1, 2}) {
 		t.Errorf("blob attribute = %+v, want DataType=Binary BinaryValue=[1 2]", blob)
 	}
 }
@@ -163,12 +164,12 @@ func TestPublish_SubscriberErrorDoesNotFailPublish(t *testing.T) {
 	publisher := &capturingPublisher{err: errors.New("boom")}
 	storage, topicARN := newTopicWithSQSSubscription(t, publisher, map[string]string{subscriptionAttrRawMessageDelivery: testAttrValueTrue})
 
-	messageID, err := storage.Publish(context.Background(), topicARN, "hello", "", "", "", "", nil)
+	result, err := storage.Publish(context.Background(), topicARN, "hello", "", "", "", "", nil)
 	if err != nil {
 		t.Fatalf("Publish() error = %v, want nil (fire-and-forget contract)", err)
 	}
 
-	if messageID == "" {
-		t.Errorf("Publish() messageID = %q, want non-empty", messageID)
+	if result.MessageID == "" {
+		t.Errorf("Publish() messageID = %q, want non-empty", result.MessageID)
 	}
 }

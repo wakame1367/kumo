@@ -165,11 +165,14 @@ func TestPublish_JSONStructureDeliversProtocolEntries(t *testing.T) {
 
 	attributes := map[string]MessageAttribute{"team": {DataType: dataTypeString, StringValue: "infra"}}
 
-	if _, err := storage.Publish(context.Background(), topicARN, testStructuredBody, messageStructureJSON, "", "g1", "d1", attributes); err != nil {
+	// A MessageGroupId on a standard topic is forwarded to SQS subscribers
+	// (SNS fair queues); MessageDeduplicationId would be rejected as a
+	// FIFO-only parameter, so it is left empty here.
+	if _, err := storage.Publish(context.Background(), topicARN, testStructuredBody, messageStructureJSON, "", "g1", "", attributes); err != nil {
 		t.Fatalf("Publish() error = %v", err)
 	}
 
-	if publisher.body != testSQSMessage || publisher.groupID != "g1" || publisher.dedupID != "d1" {
+	if publisher.body != testSQSMessage || publisher.groupID != "g1" || publisher.dedupID != "" {
 		t.Errorf("sqs delivery = body %q group %q dedup %q", publisher.body, publisher.groupID, publisher.dedupID)
 	}
 
@@ -225,11 +228,11 @@ func TestPublish_JSONStructureValidationFailsBeforeDelivery(t *testing.T) {
 	invoker := &capturingInvoker{}
 	storage, topicARN := newStructuredTopic(t, publisher, invoker, true)
 
-	messageID, err := storage.Publish(context.Background(), topicARN, `{"sqs":"no default"}`, messageStructureJSON, "", "", "", nil)
+	result, err := storage.Publish(context.Background(), topicARN, `{"sqs":"no default"}`, messageStructureJSON, "", "", "", nil)
 	assertStructureError(t, err, msgStructureNoDefault)
 
-	if messageID != "" || publisher.calls != 0 || len(invoker.arns) != 0 {
-		t.Fatalf("nothing may be delivered after a validation failure: id=%q sqs=%d lambda=%d", messageID, publisher.calls, len(invoker.arns))
+	if result != nil || publisher.calls != 0 || len(invoker.arns) != 0 {
+		t.Fatalf("nothing may be delivered after a validation failure: sqs=%d lambda=%d", publisher.calls, len(invoker.arns))
 	}
 }
 

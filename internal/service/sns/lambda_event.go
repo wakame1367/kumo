@@ -48,7 +48,7 @@ func buildLambdaEvent(sub *Subscription, message, subject, messageID string, att
 		Message:           message,
 		Timestamp:         time.Now().UTC().Format(lambdaTimestampFmt),
 		SignatureVersion:  "1",
-		Signature:         "EXAMPLE",
+		Signature:         snsPlaceholderSignature,
 		SigningCertURL:    signingCertURLPlaceholder,
 		UnsubscribeURL:    unsubscribeURL(sub.ARN),
 		MessageAttributes: lambdaMessageAttributes(attributes),
