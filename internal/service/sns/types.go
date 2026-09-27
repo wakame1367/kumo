@@ -110,6 +110,23 @@ type PublishResponse struct {
 	SequenceNumber string `json:"SequenceNumber,omitempty"`
 }
 
+// PublishBatchRequest is the request for PublishBatch.
+type PublishBatchRequest struct {
+	TopicARN                   string                     `json:"TopicArn"`
+	PublishBatchRequestEntries []PublishBatchRequestEntry `json:"PublishBatchRequestEntries"`
+}
+
+// PublishBatchRequestEntry is a single message in a PublishBatch request.
+type PublishBatchRequestEntry struct {
+	ID                     string                      `json:"Id"`
+	Message                string                      `json:"Message"`
+	Subject                string                      `json:"Subject,omitempty"`
+	MessageStructure       string                      `json:"MessageStructure,omitempty"`
+	MessageAttributes      map[string]MessageAttribute `json:"MessageAttributes,omitempty"`
+	MessageDeduplicationID string                      `json:"MessageDeduplicationId,omitempty"`
+	MessageGroupID         string                      `json:"MessageGroupId,omitempty"`
+}
+
 // ListSubscriptionsRequest is the request for ListSubscriptions.
 type ListSubscriptionsRequest struct {
 	NextToken string `json:"NextToken,omitempty"`
@@ -239,6 +256,45 @@ type XMLPublishResponse struct {
 type XMLPublishResult struct {
 	MessageID      string `xml:"MessageId"`
 	SequenceNumber string `xml:"SequenceNumber,omitempty"`
+}
+
+// XMLPublishBatchResponse is the XML response for PublishBatch.
+type XMLPublishBatchResponse struct {
+	XMLName            struct{}              `xml:"PublishBatchResponse"`
+	Xmlns              string                `xml:"xmlns,attr"`
+	PublishBatchResult XMLPublishBatchResult `xml:"PublishBatchResult"`
+	ResponseMetadata   ResponseMetadata      `xml:"ResponseMetadata"`
+}
+
+// XMLPublishBatchResult contains the per-entry results of PublishBatch.
+type XMLPublishBatchResult struct {
+	Successful XMLSuccessfulEntries `xml:"Successful"`
+	Failed     XMLFailedEntries     `xml:"Failed"`
+}
+
+// XMLSuccessfulEntries wraps successful batch entries.
+type XMLSuccessfulEntries struct {
+	Member []XMLPublishBatchResultEntry `xml:"member"`
+}
+
+// XMLFailedEntries wraps failed batch entries.
+type XMLFailedEntries struct {
+	Member []XMLBatchResultErrorEntry `xml:"member"`
+}
+
+// XMLPublishBatchResultEntry is one accepted batch entry.
+type XMLPublishBatchResultEntry struct {
+	ID             string `xml:"Id"`
+	MessageID      string `xml:"MessageId"`
+	SequenceNumber string `xml:"SequenceNumber,omitempty"`
+}
+
+// XMLBatchResultErrorEntry is one rejected batch entry.
+type XMLBatchResultErrorEntry struct {
+	ID          string `xml:"Id"`
+	Code        string `xml:"Code"`
+	Message     string `xml:"Message"`
+	SenderFault bool   `xml:"SenderFault"`
 }
 
 // XMLListSubscriptionsResponse is the XML response for ListSubscriptions.

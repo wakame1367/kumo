@@ -29,6 +29,7 @@ func newSNSCmd() *cobra.Command {
 		newSNSListTagsForResourceCmd(),
 		newSNSListTopicsCmd(),
 		newSNSPublishCmd(),
+		newSNSPublishBatchCmd(),
 		newSNSSetSubscriptionAttributesCmd(),
 		newSNSSetTopicAttributesCmd(),
 		newSNSSubscribeCmd(),
@@ -498,6 +499,57 @@ func newSNSPublishCmd() *cobra.Command {
 	cmd.Flags().StringVar(&subject, "subject", "", "Subject")
 
 	cmd.Flags().StringVar(&targetArn, "target-arn", "", "Target arn")
+
+	cmd.Flags().StringVar(&topicArn, "topic-arn", "", "Topic arn")
+
+	cmd.Flags().String("region", "", "Region override (ignored)")
+
+	return cmd
+}
+
+func newSNSPublishBatchCmd() *cobra.Command {
+	var publishBatchRequestEntries string
+	var topicArn string
+
+	cmd := &cobra.Command{
+		Use:   "publish-batch",
+		Short: "PublishBatch",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cfg, err := newAWSConfig(cmd.Context())
+			if err != nil {
+				return err
+			}
+
+			client := sns.NewFromConfig(cfg, func(o *sns.Options) {
+				o.BaseEndpoint = aws.String(endpointURL)
+			})
+
+			input := &sns.PublishBatchInput{}
+
+			if publishBatchRequestEntries != "" {
+				if err := json.Unmarshal([]byte(publishBatchRequestEntries), &input.PublishBatchRequestEntries); err != nil {
+					return fmt.Errorf("publish-batch: parse --publish-batch-request-entries: %w", err)
+				}
+			}
+
+			if topicArn != "" {
+				input.TopicArn = aws.String(topicArn)
+			}
+
+			out, err := client.PublishBatch(cmd.Context(), input)
+			if err != nil {
+				return fmt.Errorf("publish-batch failed: %w", err)
+			}
+
+			if err := writeOutput(out); err != nil {
+				return err
+			}
+
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&publishBatchRequestEntries, "publish-batch-request-entries", "", "Publish batch request entries (JSON)")
 
 	cmd.Flags().StringVar(&topicArn, "topic-arn", "", "Topic arn")
 

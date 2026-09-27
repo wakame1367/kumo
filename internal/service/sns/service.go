@@ -58,6 +58,7 @@ func (s *Service) Actions() []string {
 		"Subscribe",
 		"Unsubscribe",
 		"Publish",
+		"PublishBatch",
 		"ListSubscriptions",
 		"ListSubscriptionsByTopic",
 		"GetSubscriptionAttributes",
