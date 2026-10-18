@@ -19,6 +19,9 @@ type RestAPI struct {
 	DisableExecuteAPIEndpt bool              `json:"disableExecuteApiEndpoint,omitempty"`
 	Tags                   map[string]string `json:"tags,omitempty"`
 	RootResourceID         string            `json:"-"` // Internal use.
+	Policy                 string            `json:"policy,omitempty"`
+	BinaryMediaTypes       []string          `json:"binaryMediaTypes,omitempty"`
+	MinimumCompressionSize *int32            `json:"minimumCompressionSize,omitempty"`
 }
 
 // EndpointConfig represents the endpoint configuration for an API.
@@ -39,12 +42,62 @@ type Resource struct {
 
 // Method represents an API Gateway method.
 type Method struct {
-	HTTPMethod        string       `json:"httpMethod"`
-	AuthorizationType string       `json:"authorizationType,omitempty"`
-	AuthorizerID      string       `json:"authorizerId,omitempty"`
-	APIKeyRequired    bool         `json:"apiKeyRequired,omitempty"`
-	OperationName     string       `json:"operationName,omitempty"`
-	MethodIntegration *Integration `json:"methodIntegration,omitempty"`
+	HTTPMethod          string                     `json:"httpMethod"`
+	AuthorizationType   string                     `json:"authorizationType,omitempty"`
+	AuthorizerID        string                     `json:"authorizerId,omitempty"`
+	APIKeyRequired      bool                       `json:"apiKeyRequired,omitempty"`
+	OperationName       string                     `json:"operationName,omitempty"`
+	RequestParameters   map[string]bool            `json:"requestParameters,omitempty"`
+	RequestModels       map[string]string          `json:"requestModels,omitempty"`
+	RequestValidatorID  string                     `json:"requestValidatorId,omitempty"`
+	AuthorizationScopes []string                   `json:"authorizationScopes,omitempty"`
+	MethodResponses     map[string]*MethodResponse `json:"methodResponses,omitempty"`
+	MethodIntegration   *Integration               `json:"methodIntegration,omitempty"`
+}
+
+// MethodResponse is a method response: a status code the method can return
+// and the response headers / models it declares.
+type MethodResponse struct {
+	StatusCode         string            `json:"statusCode"`
+	ResponseParameters map[string]bool   `json:"responseParameters,omitempty"`
+	ResponseModels     map[string]string `json:"responseModels,omitempty"`
+}
+
+// IntegrationResponse maps an integration result, selected by
+// SelectionPattern, to a method response status code.
+type IntegrationResponse struct {
+	StatusCode         string            `json:"statusCode"`
+	SelectionPattern   string            `json:"selectionPattern,omitempty"`
+	ResponseParameters map[string]string `json:"responseParameters,omitempty"`
+	ResponseTemplates  map[string]string `json:"responseTemplates,omitempty"`
+	ContentHandling    string            `json:"contentHandling,omitempty"`
+}
+
+// PutMethodResponseRequest is the body of PutMethodResponse.
+type PutMethodResponseRequest struct {
+	ResponseParameters map[string]bool   `json:"responseParameters,omitempty"`
+	ResponseModels     map[string]string `json:"responseModels,omitempty"`
+}
+
+// PutIntegrationResponseRequest is the body of PutIntegrationResponse.
+type PutIntegrationResponseRequest struct {
+	SelectionPattern   string            `json:"selectionPattern,omitempty"`
+	ResponseParameters map[string]string `json:"responseParameters,omitempty"`
+	ResponseTemplates  map[string]string `json:"responseTemplates,omitempty"`
+	ContentHandling    string            `json:"contentHandling,omitempty"`
+}
+
+// PatchOperation is one entry of an Update* request's patchOperations.
+type PatchOperation struct {
+	Op    string `json:"op"`
+	Path  string `json:"path"`
+	Value string `json:"value,omitempty"`
+	From  string `json:"from,omitempty"`
+}
+
+// UpdateRequest is the body shared by every Update* (PATCH) operation.
+type UpdateRequest struct {
+	PatchOperations []PatchOperation `json:"patchOperations"`
 }
 
 // Authorizer represents an API Gateway authorizer. Only the fields kumo needs
@@ -73,6 +126,9 @@ type Integration struct {
 	CacheKeyParameters  []string          `json:"cacheKeyParameters,omitempty"`
 	RequestParameters   map[string]string `json:"requestParameters,omitempty"`
 	RequestTemplates    map[string]string `json:"requestTemplates,omitempty"`
+	Credentials         string            `json:"credentials,omitempty"`
+
+	IntegrationResponses map[string]*IntegrationResponse `json:"integrationResponses,omitempty"`
 }
 
 // Deployment represents an API Gateway deployment.
@@ -84,15 +140,41 @@ type Deployment struct {
 
 // Stage represents an API Gateway stage.
 type Stage struct {
-	StageName           string            `json:"stageName"`
-	DeploymentID        string            `json:"deploymentId"`
-	Description         string            `json:"description,omitempty"`
-	CacheClusterEnabled bool              `json:"cacheClusterEnabled,omitempty"`
-	CacheClusterSize    string            `json:"cacheClusterSize,omitempty"`
-	CreatedDate         time.Time         `json:"createdDate"`
-	LastUpdatedDate     time.Time         `json:"lastUpdatedDate"`
-	Tags                map[string]string `json:"tags,omitempty"`
-	Variables           map[string]string `json:"variables,omitempty"`
+	StageName           string                    `json:"stageName"`
+	DeploymentID        string                    `json:"deploymentId"`
+	Description         string                    `json:"description,omitempty"`
+	CacheClusterEnabled bool                      `json:"cacheClusterEnabled,omitempty"`
+	CacheClusterSize    string                    `json:"cacheClusterSize,omitempty"`
+	CreatedDate         time.Time                 `json:"createdDate"`
+	LastUpdatedDate     time.Time                 `json:"lastUpdatedDate"`
+	Tags                map[string]string         `json:"tags,omitempty"`
+	Variables           map[string]string         `json:"variables,omitempty"`
+	TracingEnabled      bool                      `json:"tracingEnabled,omitempty"`
+	AccessLogSettings   *AccessLogSettings        `json:"accessLogSettings,omitempty"`
+	MethodSettings      map[string]*MethodSetting `json:"methodSettings,omitempty"`
+}
+
+// AccessLogSettings are a stage's access logging settings. kumo stores them
+// but writes no access logs.
+type AccessLogSettings struct {
+	DestinationArn string `json:"destinationArn,omitempty"`
+	Format         string `json:"format,omitempty"`
+}
+
+// MethodSetting is a stage's per-method (or */* wildcard) settings block,
+// keyed in Stage.MethodSettings by "{resourcePath}/{httpMethod}". kumo stores
+// them but enforces none.
+type MethodSetting struct {
+	MetricsEnabled                         bool    `json:"metricsEnabled"`
+	LoggingLevel                           string  `json:"loggingLevel,omitempty"`
+	DataTraceEnabled                       bool    `json:"dataTraceEnabled"`
+	ThrottlingBurstLimit                   int32   `json:"throttlingBurstLimit"`
+	ThrottlingRateLimit                    float64 `json:"throttlingRateLimit"`
+	CachingEnabled                         bool    `json:"cachingEnabled"`
+	CacheTTLInSeconds                      int32   `json:"cacheTtlInSeconds"`
+	CacheDataEncrypted                     bool    `json:"cacheDataEncrypted"`
+	RequireAuthorizationForCacheControl    bool    `json:"requireAuthorizationForCacheControl"`
+	UnauthorizedCacheControlHeaderStrategy string  `json:"unauthorizedCacheControlHeaderStrategy,omitempty"`
 }
 
 // CreateRestAPIRequest represents a CreateRestApi request.
@@ -104,6 +186,9 @@ type CreateRestAPIRequest struct {
 	EndpointConfiguration  *EndpointConfig   `json:"endpointConfiguration,omitempty"`
 	DisableExecuteAPIEndpt bool              `json:"disableExecuteApiEndpoint,omitempty"`
 	Tags                   map[string]string `json:"tags,omitempty"`
+	Policy                 string            `json:"policy,omitempty"`
+	BinaryMediaTypes       []string          `json:"binaryMediaTypes,omitempty"`
+	MinimumCompressionSize *int32            `json:"minimumCompressionSize,omitempty"`
 }
 
 // CreateRestAPIResponse represents a CreateRestApi response.
@@ -118,6 +203,9 @@ type CreateRestAPIResponse struct {
 	DisableExecuteAPIEndpt bool              `json:"disableExecuteApiEndpoint,omitempty"`
 	Tags                   map[string]string `json:"tags,omitempty"`
 	RootResourceID         string            `json:"rootResourceId,omitempty"`
+	Policy                 string            `json:"policy,omitempty"`
+	BinaryMediaTypes       []string          `json:"binaryMediaTypes,omitempty"`
+	MinimumCompressionSize *int32            `json:"minimumCompressionSize,omitempty"`
 }
 
 // GetRestAPIsResponse represents a GetRestApis response.
@@ -148,6 +236,12 @@ type MethodOutput struct {
 	APIKeyRequired    bool               `json:"apiKeyRequired,omitempty"`
 	OperationName     string             `json:"operationName,omitempty"`
 	MethodIntegration *IntegrationOutput `json:"methodIntegration,omitempty"`
+
+	RequestParameters   map[string]bool            `json:"requestParameters,omitempty"`
+	RequestModels       map[string]string          `json:"requestModels,omitempty"`
+	RequestValidatorID  string                     `json:"requestValidatorId,omitempty"`
+	AuthorizationScopes []string                   `json:"authorizationScopes,omitempty"`
+	MethodResponses     map[string]*MethodResponse `json:"methodResponses,omitempty"`
 }
 
 // IntegrationOutput represents an Integration in response.
@@ -164,6 +258,9 @@ type IntegrationOutput struct {
 	CacheKeyParameters  []string          `json:"cacheKeyParameters,omitempty"`
 	RequestParameters   map[string]string `json:"requestParameters,omitempty"`
 	RequestTemplates    map[string]string `json:"requestTemplates,omitempty"`
+	Credentials         string            `json:"credentials,omitempty"`
+
+	IntegrationResponses map[string]*IntegrationResponse `json:"integrationResponses,omitempty"`
 }
 
 // GetResourcesResponse represents a GetResources response.
@@ -174,10 +271,14 @@ type GetResourcesResponse struct {
 
 // PutMethodRequest represents a PutMethod request.
 type PutMethodRequest struct {
-	AuthorizationType string `json:"authorizationType"`
-	AuthorizerID      string `json:"authorizerId,omitempty"`
-	APIKeyRequired    bool   `json:"apiKeyRequired,omitempty"`
-	OperationName     string `json:"operationName,omitempty"`
+	AuthorizationType   string            `json:"authorizationType"`
+	AuthorizerID        string            `json:"authorizerId,omitempty"`
+	APIKeyRequired      bool              `json:"apiKeyRequired,omitempty"`
+	OperationName       string            `json:"operationName,omitempty"`
+	RequestParameters   map[string]bool   `json:"requestParameters,omitempty"`
+	RequestModels       map[string]string `json:"requestModels,omitempty"`
+	RequestValidatorID  string            `json:"requestValidatorId,omitempty"`
+	AuthorizationScopes []string          `json:"authorizationScopes,omitempty"`
 }
 
 // CreateAuthorizerRequest represents a CreateAuthorizer request.
@@ -297,6 +398,7 @@ type PutIntegrationRequest struct {
 	CacheKeyParameters  []string          `json:"cacheKeyParameters,omitempty"`
 	RequestParameters   map[string]string `json:"requestParameters,omitempty"`
 	RequestTemplates    map[string]string `json:"requestTemplates,omitempty"`
+	Credentials         string            `json:"credentials,omitempty"`
 }
 
 // CreateDeploymentRequest represents a CreateDeployment request.
@@ -327,19 +429,23 @@ type CreateStageRequest struct {
 	CacheClusterSize    string            `json:"cacheClusterSize,omitempty"`
 	Tags                map[string]string `json:"tags,omitempty"`
 	Variables           map[string]string `json:"variables,omitempty"`
+	TracingEnabled      bool              `json:"tracingEnabled,omitempty"`
 }
 
 // StageResponse represents a Stage response.
 type StageResponse struct {
-	StageName           string            `json:"stageName"`
-	DeploymentID        string            `json:"deploymentId"`
-	Description         string            `json:"description,omitempty"`
-	CacheClusterEnabled bool              `json:"cacheClusterEnabled,omitempty"`
-	CacheClusterSize    string            `json:"cacheClusterSize,omitempty"`
-	CreatedDate         float64           `json:"createdDate"`
-	LastUpdatedDate     float64           `json:"lastUpdatedDate"`
-	Tags                map[string]string `json:"tags,omitempty"`
-	Variables           map[string]string `json:"variables,omitempty"`
+	StageName           string                    `json:"stageName"`
+	DeploymentID        string                    `json:"deploymentId"`
+	Description         string                    `json:"description,omitempty"`
+	CacheClusterEnabled bool                      `json:"cacheClusterEnabled,omitempty"`
+	CacheClusterSize    string                    `json:"cacheClusterSize,omitempty"`
+	CreatedDate         float64                   `json:"createdDate"`
+	LastUpdatedDate     float64                   `json:"lastUpdatedDate"`
+	Tags                map[string]string         `json:"tags,omitempty"`
+	Variables           map[string]string         `json:"variables,omitempty"`
+	TracingEnabled      bool                      `json:"tracingEnabled"`
+	AccessLogSettings   *AccessLogSettings        `json:"accessLogSettings,omitempty"`
+	MethodSettings      map[string]*MethodSetting `json:"methodSettings,omitempty"`
 }
 
 // GetStagesResponse represents a GetStages response.

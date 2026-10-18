@@ -50,6 +50,12 @@ func (s *Service) HandleExecuteAPI(w http.ResponseWriter, r *http.Request, apiID
 		}
 	}
 
+	if resolved.method.MethodIntegration.Type == integrationTypeMock {
+		serveMock(w, r, resolved.method.MethodIntegration)
+
+		return true
+	}
+
 	execapi.Dispatch(w, r,
 		execapi.Target{
 			Type: resolved.method.MethodIntegration.Type,

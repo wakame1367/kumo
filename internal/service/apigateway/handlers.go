@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/google/uuid"
@@ -499,7 +500,23 @@ func toRestAPIResponse(api *RestAPI) *CreateRestAPIResponse {
 		DisableExecuteAPIEndpt: api.DisableExecuteAPIEndpt,
 		Tags:                   api.Tags,
 		RootResourceID:         api.RootResourceID,
+		Policy:                 escapePolicy(api.Policy),
+		BinaryMediaTypes:       api.BinaryMediaTypes,
+		MinimumCompressionSize: api.MinimumCompressionSize,
 	}
+}
+
+// escapePolicy renders a resource policy the way GetRestApi returns it: as
+// a JSON document whose quotes are backslash-escaped. Clients (notably the
+// Terraform AWS provider) unquote it before parsing.
+func escapePolicy(policy string) string {
+	if policy == "" {
+		return ""
+	}
+
+	quoted := strconv.Quote(policy)
+
+	return quoted[1 : len(quoted)-1]
 }
 
 // toResourceResponse converts a Resource to ResourceResponse.
@@ -522,11 +539,16 @@ func toResourceResponse(res *Resource) *ResourceResponse {
 // toMethodOutput converts a Method to MethodOutput.
 func toMethodOutput(m *Method) *MethodOutput {
 	output := &MethodOutput{
-		HTTPMethod:        m.HTTPMethod,
-		AuthorizationType: m.AuthorizationType,
-		AuthorizerID:      m.AuthorizerID,
-		APIKeyRequired:    m.APIKeyRequired,
-		OperationName:     m.OperationName,
+		HTTPMethod:          m.HTTPMethod,
+		AuthorizationType:   m.AuthorizationType,
+		AuthorizerID:        m.AuthorizerID,
+		APIKeyRequired:      m.APIKeyRequired,
+		OperationName:       m.OperationName,
+		RequestParameters:   m.RequestParameters,
+		RequestModels:       m.RequestModels,
+		RequestValidatorID:  m.RequestValidatorID,
+		AuthorizationScopes: m.AuthorizationScopes,
+		MethodResponses:     m.MethodResponses,
 	}
 
 	if m.MethodIntegration != nil {
@@ -551,6 +573,9 @@ func toIntegrationOutput(i *Integration) *IntegrationOutput {
 		CacheKeyParameters:  i.CacheKeyParameters,
 		RequestParameters:   i.RequestParameters,
 		RequestTemplates:    i.RequestTemplates,
+		Credentials:         i.Credentials,
+
+		IntegrationResponses: i.IntegrationResponses,
 	}
 }
 
@@ -575,6 +600,9 @@ func toStageResponse(s *Stage) *StageResponse {
 		LastUpdatedDate:     float64(s.LastUpdatedDate.Unix()),
 		Tags:                s.Tags,
 		Variables:           s.Variables,
+		TracingEnabled:      s.TracingEnabled,
+		AccessLogSettings:   s.AccessLogSettings,
+		MethodSettings:      s.MethodSettings,
 	}
 }
 

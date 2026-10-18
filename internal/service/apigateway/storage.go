@@ -62,6 +62,26 @@ type Storage interface {
 	GetAuthorizer(ctx context.Context, restAPIID, authorizerID string) (*Authorizer, error)
 	GetAuthorizers(ctx context.Context, restAPIID string) ([]*Authorizer, error)
 	DeleteAuthorizer(ctx context.Context, restAPIID, authorizerID string) error
+
+	DeleteIntegration(ctx context.Context, restAPIID, resourceID, httpMethod string) error
+
+	PutMethodResponse(ctx context.Context, restAPIID, resourceID, httpMethod, statusCode string, req *PutMethodResponseRequest) (*MethodResponse, error)
+	GetMethodResponse(ctx context.Context, restAPIID, resourceID, httpMethod, statusCode string) (*MethodResponse, error)
+	DeleteMethodResponse(ctx context.Context, restAPIID, resourceID, httpMethod, statusCode string) error
+
+	PutIntegrationResponse(ctx context.Context, restAPIID, resourceID, httpMethod, statusCode string, req *PutIntegrationResponseRequest) (*IntegrationResponse, error)
+	GetIntegrationResponse(ctx context.Context, restAPIID, resourceID, httpMethod, statusCode string) (*IntegrationResponse, error)
+	DeleteIntegrationResponse(ctx context.Context, restAPIID, resourceID, httpMethod, statusCode string) error
+
+	// Update* apply PATCH operations.
+	UpdateRestAPI(ctx context.Context, restAPIID string, ops []PatchOperation) (*RestAPI, error)
+	UpdateResource(ctx context.Context, restAPIID, resourceID string, ops []PatchOperation) (*Resource, error)
+	UpdateMethod(ctx context.Context, restAPIID, resourceID, httpMethod string, ops []PatchOperation) (*Method, error)
+	UpdateIntegration(ctx context.Context, restAPIID, resourceID, httpMethod string, ops []PatchOperation) (*Integration, error)
+	UpdateMethodResponse(ctx context.Context, restAPIID, resourceID, httpMethod, statusCode string, ops []PatchOperation) (*MethodResponse, error)
+	UpdateIntegrationResponse(ctx context.Context, restAPIID, resourceID, httpMethod, statusCode string, ops []PatchOperation) (*IntegrationResponse, error)
+	UpdateDeployment(ctx context.Context, restAPIID, deploymentID string, ops []PatchOperation) (*Deployment, error)
+	UpdateStage(ctx context.Context, restAPIID, stageName string, ops []PatchOperation) (*Stage, error)
 }
 
 // Option is a configuration option for MemoryStorage.
@@ -197,6 +217,9 @@ func (s *MemoryStorage) CreateRestAPI(_ context.Context, req *CreateRestAPIReque
 		DisableExecuteAPIEndpt: req.DisableExecuteAPIEndpt,
 		Tags:                   req.Tags,
 		RootResourceID:         rootResourceID,
+		Policy:                 req.Policy,
+		BinaryMediaTypes:       req.BinaryMediaTypes,
+		MinimumCompressionSize: req.MinimumCompressionSize,
 	}
 
 	rootResource := &Resource{
@@ -215,7 +238,7 @@ func (s *MemoryStorage) CreateRestAPI(_ context.Context, req *CreateRestAPIReque
 
 	s.saveLocked()
 
-	return api, nil
+	return api.clone(), nil
 }
 
 // GetRestAPI returns a REST API by ID.
@@ -228,7 +251,7 @@ func (s *MemoryStorage) GetRestAPI(_ context.Context, restAPIID string) (*RestAP
 		return nil, &ServiceError{Code: errRestAPINotFound, Message: msgInvalidRestAPIID}
 	}
 
-	return data.API, nil
+	return data.API.clone(), nil
 }
 
 // GetRestAPIs returns all REST APIs.
@@ -243,7 +266,7 @@ func (s *MemoryStorage) GetRestAPIs(_ context.Context, limit int32, _ string) ([
 	var apis []*RestAPI
 
 	for _, data := range s.RestAPIs {
-		apis = append(apis, data.API)
+		apis = append(apis, data.API.clone())
 
 		if int32(len(apis)) >= limit { //nolint:gosec // slice length bounded by limit parameter
 			break
@@ -317,7 +340,7 @@ func (s *MemoryStorage) GetResource(_ context.Context, restAPIID, resourceID str
 		return nil, &ServiceError{Code: errResourceNotFound, Message: msgInvalidResourceID}
 	}
 
-	return resource, nil
+	return resource.clone(), nil
 }
 
 // GetResources returns all resources for a REST API.
@@ -337,7 +360,7 @@ func (s *MemoryStorage) GetResources(_ context.Context, restAPIID string, limit 
 	var resources []*Resource
 
 	for _, r := range data.Resources {
-		resources = append(resources, r)
+		resources = append(resources, r.clone())
 
 		if int32(len(resources)) >= limit { //nolint:gosec // slice length bounded by limit parameter
 			break
@@ -389,11 +412,15 @@ func (s *MemoryStorage) PutMethod(_ context.Context, restAPIID, resourceID, http
 	}
 
 	method := Method{
-		HTTPMethod:        httpMethod,
-		AuthorizationType: req.AuthorizationType,
-		AuthorizerID:      req.AuthorizerID,
-		APIKeyRequired:    req.APIKeyRequired,
-		OperationName:     req.OperationName,
+		HTTPMethod:          httpMethod,
+		AuthorizationType:   req.AuthorizationType,
+		AuthorizerID:        req.AuthorizerID,
+		APIKeyRequired:      req.APIKeyRequired,
+		OperationName:       req.OperationName,
+		RequestParameters:   req.RequestParameters,
+		RequestModels:       req.RequestModels,
+		RequestValidatorID:  req.RequestValidatorID,
+		AuthorizationScopes: req.AuthorizationScopes,
 	}
 
 	resource.ResourceMethods[httpMethod] = method
@@ -423,7 +450,7 @@ func (s *MemoryStorage) GetMethod(_ context.Context, restAPIID, resourceID, http
 		return nil, &ServiceError{Code: errMethodNotFound, Message: msgInvalidMethodID}
 	}
 
-	return &method, nil
+	return method.clone(), nil
 }
 
 // DeleteMethod removes a method from a resource.
@@ -485,6 +512,7 @@ func (s *MemoryStorage) PutIntegration(_ context.Context, restAPIID, resourceID,
 		CacheKeyParameters:  req.CacheKeyParameters,
 		RequestParameters:   req.RequestParameters,
 		RequestTemplates:    req.RequestTemplates,
+		Credentials:         req.Credentials,
 	}
 
 	method.MethodIntegration = integration
@@ -519,7 +547,7 @@ func (s *MemoryStorage) GetIntegration(_ context.Context, restAPIID, resourceID,
 		return nil, &ServiceError{Code: errMethodNotFound, Message: "Integration not found"}
 	}
 
-	return method.MethodIntegration, nil
+	return method.MethodIntegration.clone(), nil
 }
 
 // CreateDeployment creates a new deployment.
@@ -650,6 +678,7 @@ func (s *MemoryStorage) CreateStage(_ context.Context, restAPIID string, req *Cr
 		LastUpdatedDate:     now,
 		Tags:                req.Tags,
 		Variables:           req.Variables,
+		TracingEnabled:      req.TracingEnabled,
 	}
 
 	data.Stages[req.StageName] = stage
@@ -674,7 +703,7 @@ func (s *MemoryStorage) GetStage(_ context.Context, restAPIID, stageName string)
 		return nil, &ServiceError{Code: errStageNotFound, Message: "Invalid stage identifier specified"}
 	}
 
-	return stage, nil
+	return stage.clone(), nil
 }
 
 // GetStages returns all stages.
@@ -690,7 +719,7 @@ func (s *MemoryStorage) GetStages(_ context.Context, restAPIID string) ([]*Stage
 	var stages []*Stage
 
 	for _, stage := range data.Stages {
-		stages = append(stages, stage)
+		stages = append(stages, stage.clone())
 	}
 
 	return stages, nil

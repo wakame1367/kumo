@@ -63,33 +63,52 @@ func (s *Service) registerAPIRoutes(r service.Router) {
 	r.HandleFunc("POST", "/restapis", s.CreateRestAPI)
 	r.HandleFunc("GET", "/restapis", s.GetRestAPIs)
 	r.HandleFunc("GET", "/restapis/{restApiId}", s.GetRestAPI)
+	r.HandleFunc("PATCH", "/restapis/{restApiId}", s.UpdateRestAPI)
 	r.HandleFunc("DELETE", "/restapis/{restApiId}", s.DeleteRestAPI)
 
 	// Resource routes.
 	r.HandleFunc("POST", "/restapis/{restApiId}/resources/{parentId}", s.CreateResource)
 	r.HandleFunc("GET", "/restapis/{restApiId}/resources", s.GetResources)
 	r.HandleFunc("GET", "/restapis/{restApiId}/resources/{resourceId}", s.GetResource)
+	r.HandleFunc("PATCH", "/restapis/{restApiId}/resources/{resourceId}", s.UpdateResource)
 	r.HandleFunc("DELETE", "/restapis/{restApiId}/resources/{resourceId}", s.DeleteResource)
 
 	// Method routes.
 	r.HandleFunc("PUT", "/restapis/{restApiId}/resources/{resourceId}/methods/{httpMethod}", s.PutMethod)
 	r.HandleFunc("GET", "/restapis/{restApiId}/resources/{resourceId}/methods/{httpMethod}", s.GetMethod)
 	r.HandleFunc("DELETE", "/restapis/{restApiId}/resources/{resourceId}/methods/{httpMethod}", s.DeleteMethod)
+	r.HandleFunc("PATCH", "/restapis/{restApiId}/resources/{resourceId}/methods/{httpMethod}", s.UpdateMethod)
+
+	// Method response routes.
+	r.HandleFunc("PUT", "/restapis/{restApiId}/resources/{resourceId}/methods/{httpMethod}/responses/{statusCode}", s.PutMethodResponse)
+	r.HandleFunc("GET", "/restapis/{restApiId}/resources/{resourceId}/methods/{httpMethod}/responses/{statusCode}", s.GetMethodResponse)
+	r.HandleFunc("PATCH", "/restapis/{restApiId}/resources/{resourceId}/methods/{httpMethod}/responses/{statusCode}", s.UpdateMethodResponse)
+	r.HandleFunc("DELETE", "/restapis/{restApiId}/resources/{resourceId}/methods/{httpMethod}/responses/{statusCode}", s.DeleteMethodResponse)
 
 	// Integration routes.
 	r.HandleFunc("PUT", "/restapis/{restApiId}/resources/{resourceId}/methods/{httpMethod}/integration", s.PutIntegration)
 	r.HandleFunc("GET", "/restapis/{restApiId}/resources/{resourceId}/methods/{httpMethod}/integration", s.GetIntegration)
+	r.HandleFunc("PATCH", "/restapis/{restApiId}/resources/{resourceId}/methods/{httpMethod}/integration", s.UpdateIntegration)
+	r.HandleFunc("DELETE", "/restapis/{restApiId}/resources/{resourceId}/methods/{httpMethod}/integration", s.DeleteIntegration)
+
+	// Integration response routes.
+	r.HandleFunc("PUT", "/restapis/{restApiId}/resources/{resourceId}/methods/{httpMethod}/integration/responses/{statusCode}", s.PutIntegrationResponse)
+	r.HandleFunc("GET", "/restapis/{restApiId}/resources/{resourceId}/methods/{httpMethod}/integration/responses/{statusCode}", s.GetIntegrationResponse)
+	r.HandleFunc("PATCH", "/restapis/{restApiId}/resources/{resourceId}/methods/{httpMethod}/integration/responses/{statusCode}", s.UpdateIntegrationResponse)
+	r.HandleFunc("DELETE", "/restapis/{restApiId}/resources/{resourceId}/methods/{httpMethod}/integration/responses/{statusCode}", s.DeleteIntegrationResponse)
 
 	// Deployment routes.
 	r.HandleFunc("POST", "/restapis/{restApiId}/deployments", s.CreateDeployment)
 	r.HandleFunc("GET", "/restapis/{restApiId}/deployments", s.GetDeployments)
 	r.HandleFunc("GET", "/restapis/{restApiId}/deployments/{deploymentId}", s.GetDeployment)
+	r.HandleFunc("PATCH", "/restapis/{restApiId}/deployments/{deploymentId}", s.UpdateDeployment)
 	r.HandleFunc("DELETE", "/restapis/{restApiId}/deployments/{deploymentId}", s.DeleteDeployment)
 
 	// Stage routes.
 	r.HandleFunc("POST", "/restapis/{restApiId}/stages", s.CreateStage)
 	r.HandleFunc("GET", "/restapis/{restApiId}/stages", s.GetStages)
 	r.HandleFunc("GET", "/restapis/{restApiId}/stages/{stageName}", s.GetStage)
+	r.HandleFunc("PATCH", "/restapis/{restApiId}/stages/{stageName}", s.UpdateStage)
 	r.HandleFunc("DELETE", "/restapis/{restApiId}/stages/{stageName}", s.DeleteStage)
 
 	// Authorizer routes.
