@@ -66,6 +66,7 @@ func (s *Service) HandleExecuteAPI(w http.ResponseWriter, r *http.Request, apiID
 			APIID:          apiID,
 			Stage:          stage,
 			ResourcePath:   resolved.resource.Path,
+			RequestPath:    reqPath,
 			PathParameters: resolved.pathParams,
 			StageVariables: resolved.stage.Variables,
 		},

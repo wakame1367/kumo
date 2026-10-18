@@ -54,9 +54,14 @@ func buildEventV1(r *http.Request, req *Request, body []byte) ([]byte, error) {
 	headers, multiHeaders := collectHeaders(r)
 	query, multiQuery := collectQuery(r)
 
+	requestPath := req.RequestPath
+	if requestPath == "" {
+		requestPath = req.ResourcePath
+	}
+
 	event := proxyEventV1{
 		Resource:                        req.ResourcePath,
-		Path:                            req.ResourcePath,
+		Path:                            requestPath,
 		HTTPMethod:                      r.Method,
 		Headers:                         headers,
 		MultiValueHeaders:               multiHeaders,
@@ -68,7 +73,7 @@ func buildEventV1(r *http.Request, req *Request, body []byte) ([]byte, error) {
 		RequestContext: requestContextV1{
 			ResourcePath: req.ResourcePath,
 			HTTPMethod:   r.Method,
-			Path:         stagePath(req.Stage, req.ResourcePath),
+			Path:         stagePath(req.Stage, requestPath),
 			APIID:        req.APIID,
 			Stage:        req.Stage,
 			RequestID:    uuid.New().String(),

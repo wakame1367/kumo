@@ -43,10 +43,13 @@ type Target struct {
 
 // Request carries the metadata needed to build the Lambda event.
 type Request struct {
-	BaseURL        string
-	APIID          string
-	Stage          string
-	ResourcePath   string // matched resource path template (v1) or route path
+	BaseURL      string
+	APIID        string
+	Stage        string
+	ResourcePath string // matched resource path template (v1) or route path
+	// RequestPath is the path the client requested below the stage, e.g.
+	// /items/42 for the /items/{id} resource. Empty means ResourcePath.
+	RequestPath    string
 	RouteKey       string // v2 route key, e.g. "GET /items" or "$default"
 	PathParameters map[string]string
 	StageVariables map[string]string
