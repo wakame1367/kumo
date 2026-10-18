@@ -135,6 +135,12 @@ type Storage interface {
 	PutObjectACL(ctx context.Context, bucket, key string, acl *ObjectACL) error
 	GetObjectACL(ctx context.Context, bucket, key string) (*ObjectACL, error)
 
+	// Bucket ACL and object ownership
+	PutBucketACL(ctx context.Context, bucket string, acl *ObjectACL) error
+	GetBucketACL(ctx context.Context, bucket string) (*ObjectACL, error)
+	PutBucketOwnershipControls(ctx context.Context, bucket, ownership string) error
+	GetBucketOwnershipControls(ctx context.Context, bucket string) (string, error)
+
 	// Notification and CORS
 	SetEventBridgeNotification(ctx context.Context, bucket string, enabled bool)
 	IsEventBridgeEnabled(ctx context.Context, bucket string) bool
@@ -146,6 +152,7 @@ type Storage interface {
 	GetTopicConfigurations(ctx context.Context, bucket string) []TopicConfiguration
 	SetCORSConfiguration(ctx context.Context, bucket string, rules []CORSRule)
 	GetCORSRules(ctx context.Context, bucket string) []CORSRule
+	DeleteCORSConfiguration(ctx context.Context, bucket string) error
 
 	PutPublicAccessBlock(ctx context.Context, bucket string, cfg PublicAccessBlockConfig) error
 	GetPublicAccessBlock(ctx context.Context, bucket string) (*PublicAccessBlockConfig, error)
@@ -236,6 +243,8 @@ type MemoryBucket struct {
 	ObjectRestores          map[string]*RestoreState      `json:"objectRestores,omitempty"`          // per-object restore state (key -> state)
 	Tags                    map[string]string             `json:"tags,omitempty"`                    // bucket tags (nil == no tag set configured)
 	ObjectLockConfiguration *ObjectLockConfiguration      `json:"objectLockConfiguration,omitempty"` // bucket default-retention configuration
+	ACL                     *ObjectACL                    `json:"acl,omitempty"`                     // bucket ACL (nil == private)
+	ObjectOwnership         string                        `json:"objectOwnership,omitempty"`         // ownership controls ("" == not configured)
 }
 
 // BucketLoggingConfig stores the destination for server access logs.

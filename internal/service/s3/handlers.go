@@ -154,6 +154,8 @@ const (
 	subresourceNotification      = "notification"
 	subresourceTagging           = "tagging"
 	subresourceObjectLock        = "object-lock"
+	subresourceACL               = "acl"
+	subresourceOwnershipControls = "ownershipControls"
 )
 
 // subresourceHandler pairs a bucket query-parameter key with the handler that
@@ -180,6 +182,8 @@ var bucketGetSubresources = []subresourceHandler{
 	{subresourceNotification, (*Service).GetBucketNotificationConfiguration},
 	{subresourceTagging, (*Service).GetBucketTagging},
 	{subresourceObjectLock, (*Service).GetObjectLockConfiguration},
+	{subresourceACL, (*Service).GetBucketACL},
+	{subresourceOwnershipControls, (*Service).GetBucketOwnershipControls},
 }
 
 // bucketPutSubresources maps a PUT query-parameter key to its handler, in the
@@ -196,6 +200,8 @@ var bucketPutSubresources = []subresourceHandler{
 	{subresourceLifecycle, (*Service).PutBucketLifecycleConfiguration},
 	{subresourceTagging, (*Service).PutBucketTagging},
 	{subresourceObjectLock, (*Service).PutObjectLockConfiguration},
+	{subresourceACL, (*Service).PutBucketACL},
+	{subresourceOwnershipControls, (*Service).PutBucketOwnershipControls},
 }
 
 // bucketDeleteSubresources maps a DELETE query-parameter key to its handler, in
@@ -208,6 +214,8 @@ var bucketDeleteSubresources = []subresourceHandler{
 	{subresourceWebsite, (*Service).DeleteBucketWebsite},
 	{subresourceLifecycle, (*Service).DeleteBucketLifecycle},
 	{subresourceTagging, (*Service).DeleteBucketTagging},
+	{subresourceCORS, (*Service).DeleteBucketCors},
+	{subresourceOwnershipControls, (*Service).DeleteBucketOwnershipControls},
 }
 
 // dispatchBucketSubresource invokes the first registered sub-resource handler
@@ -253,8 +261,6 @@ func (s *Service) serveBucketSubresourceStub(w http.ResponseWriter, r *http.Requ
 	q := r.URL.Query()
 
 	switch {
-	case q.Has("acl"):
-		writeXMLResponse(w, defaultBucketACL())
 	case q.Has("location"):
 		writeXMLResponse(w, struct {
 			XMLName xml.Name `xml:"LocationConstraint"`
@@ -289,9 +295,8 @@ func (s *Service) serveBucketSubresourceStub(w http.ResponseWriter, r *http.Requ
 // code returned when the sub-resource is unconfigured.
 func bucketSubresourceErrorCode(q map[string][]string) (string, bool) {
 	mapping := map[string]string{
-		"cors":              "NoSuchCORSConfiguration",
-		"replication":       "ReplicationConfigurationNotFoundError",
-		"ownershipControls": "OwnershipControlsNotFoundError",
+		"cors":        "NoSuchCORSConfiguration",
+		"replication": "ReplicationConfigurationNotFoundError",
 	}
 
 	for key, code := range mapping {
@@ -301,55 +306,6 @@ func bucketSubresourceErrorCode(q map[string][]string) (string, bool) {
 	}
 
 	return "", false
-}
-
-// defaultBucketACL builds the ACL response real S3 returns when the bucket has
-// no explicit ACL set: owner gets FULL_CONTROL.
-func defaultBucketACL() any {
-	type grantee struct {
-		XMLName     xml.Name `xml:"Grantee"`
-		XSI         string   `xml:"xmlns:xsi,attr"`
-		Type        string   `xml:"xsi:type,attr"`
-		ID          string   `xml:"ID,omitempty"`
-		DisplayName string   `xml:"DisplayName,omitempty"`
-	}
-
-	type grant struct {
-		XMLName    xml.Name `xml:"Grant"`
-		Grantee    grantee
-		Permission string `xml:"Permission"`
-	}
-
-	type owner struct {
-		XMLName     xml.Name `xml:"Owner"`
-		ID          string   `xml:"ID"`
-		DisplayName string   `xml:"DisplayName,omitempty"`
-	}
-
-	return struct {
-		XMLName           xml.Name `xml:"AccessControlPolicy"`
-		Xmlns             string   `xml:"xmlns,attr,omitempty"`
-		Owner             owner
-		AccessControlList struct {
-			Grant grant
-		} `xml:"AccessControlList"`
-	}{
-		Xmlns: s3Namespace,
-		Owner: owner{ID: ownerID, DisplayName: ownerDisplayName},
-		AccessControlList: struct {
-			Grant grant
-		}{
-			Grant: grant{
-				Grantee: grantee{
-					XSI:         xsiNamespaceAttr,
-					Type:        "CanonicalUser",
-					ID:          ownerID,
-					DisplayName: ownerDisplayName,
-				},
-				Permission: "FULL_CONTROL",
-			},
-		},
-	}
 }
 
 // handleBucketPost dispatches POST /{bucket} requests based on query parameters.

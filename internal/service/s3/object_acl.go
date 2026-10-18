@@ -186,32 +186,27 @@ func decodeObjectACL(body []byte, cannedHeader string) (*ObjectACL, error) {
 }
 
 // encodeObjectACL renders an ObjectACL back to AccessControlPolicy
-// XML. Canned ACLs are expanded to a synthetic single grant for the
-// owner (FULL_CONTROL) so the response shape is always the same — that
-// matches what real S3 emits when you GetObjectAcl on an object that
-// was set via `x-amz-acl: private`.
+// XML. Canned ACLs are expanded the way S3 reports them: the owner's
+// FULL_CONTROL plus the canned ACL's group grants (e.g. AllUsers READ
+// for public-read).
 func encodeObjectACL(acl *ObjectACL) *AccessControlPolicy {
 	p := &AccessControlPolicy{
 		Xmlns: s3Namespace,
 		Owner: AccessControlOwner{ID: acl.OwnerID, DisplayName: acl.OwnerName},
 	}
 
-	if len(acl.Grants) == 0 {
-		p.ACL.Grants = []AccessControlGrant{{
-			Grantee: AccessControlGrantee{
-				XSI:         xsiNamespaceAttr,
-				Type:        "CanonicalUser",
-				ID:          acl.OwnerID,
-				DisplayName: acl.OwnerName,
-			},
-			Permission: "FULL_CONTROL",
-		}}
-
-		return p
+	grants := acl.Grants
+	if len(grants) == 0 {
+		grants = append([]ACLGrant{{
+			GranteeType: "CanonicalUser",
+			GranteeID:   acl.OwnerID,
+			DisplayName: acl.OwnerName,
+			Permission:  "FULL_CONTROL",
+		}}, cannedACLGrants(acl.CannedACL)...)
 	}
 
-	p.ACL.Grants = make([]AccessControlGrant, len(acl.Grants))
-	for i, g := range acl.Grants {
+	p.ACL.Grants = make([]AccessControlGrant, len(grants))
+	for i, g := range grants {
 		p.ACL.Grants[i] = AccessControlGrant{
 			Grantee: AccessControlGrantee{
 				XSI:         xsiNamespaceAttr,
