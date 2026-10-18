@@ -2,10 +2,7 @@ package apigateway
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"maps"
-	"net/http"
 	"slices"
 	"strconv"
 	"strings"
@@ -20,6 +17,14 @@ const (
 	patchMove    = "move"
 	patchCopy    = "copy"
 	patchTest    = "test"
+)
+
+// Patch path segments shared by several resources.
+const (
+	fieldDescription        = "description"
+	fieldRequestParameters  = "requestParameters"
+	fieldResponseParameters = "responseParameters"
+	fieldContentHandling    = "contentHandling"
 )
 
 // patchSegments splits a patch path into its JSON-pointer segments,
@@ -37,10 +42,22 @@ func invalidPatch(op PatchOperation) error {
 	return &ServiceError{Code: errBadRequest, Message: fmt.Sprintf("Invalid patch path '%s' specified for op '%s'.", op.Path, op.Op)}
 }
 
-// applyPatch runs each operation through apply, which receives the
-// operation and its decoded path segments. move / copy / test are rejected:
+func invalidPatchValue(op PatchOperation, kind string) error {
+	return &ServiceError{Code: errBadRequest, Message: fmt.Sprintf("Invalid %s value '%s' for path '%s'.", kind, op.Value, op.Path)}
+}
+
+// patcher applies patch operations to a T. fields handles one-segment paths
+// (/name), entries two-segment paths into a map or list (/variables/{key}),
+// and fallback, when set, every other path.
+type patcher[T any] struct {
+	fields   map[string]func(*T, PatchOperation) error
+	entries  map[string]func(*T, PatchOperation, string) error
+	fallback func(*T, PatchOperation, []string) error
+}
+
+// apply runs every operation against target. move / copy / test are rejected:
 // none of the patched resources accept them for the paths kumo models.
-func applyPatch(ops []PatchOperation, apply func(op PatchOperation, segs []string) error) error {
+func (p *patcher[T]) apply(target *T, ops []PatchOperation) error {
 	for _, op := range ops {
 		switch op.Op {
 		case patchAdd, patchRemove, patchReplace:
@@ -50,7 +67,7 @@ func applyPatch(ops []PatchOperation, apply func(op PatchOperation, segs []strin
 			return &ServiceError{Code: errBadRequest, Message: fmt.Sprintf("Invalid patch operation specified: '%s'.", op.Op)}
 		}
 
-		if err := apply(op, patchSegments(op.Path)); err != nil {
+		if err := p.applyOne(target, op, patchSegments(op.Path)); err != nil {
 			return err
 		}
 	}
@@ -58,7 +75,76 @@ func applyPatch(ops []PatchOperation, apply func(op PatchOperation, segs []strin
 	return nil
 }
 
-// patchString sets or clears a string field.
+func (p *patcher[T]) applyOne(target *T, op PatchOperation, segs []string) error {
+	if f, ok := p.fields[segs[0]]; ok && len(segs) == 1 {
+		return f(target, op)
+	}
+
+	if f, ok := p.entries[segs[0]]; ok && len(segs) == 2 {
+		return f(target, op, segs[1])
+	}
+
+	if p.fallback != nil {
+		return p.fallback(target, op, segs)
+	}
+
+	return invalidPatch(op)
+}
+
+// stringField patches a string field; remove clears it.
+func stringField[T any](field func(*T) *string) func(*T, PatchOperation) error {
+	return func(t *T, op PatchOperation) error {
+		patchString(field(t), op)
+
+		return nil
+	}
+}
+
+// boolField patches a boolean field; remove resets it to false.
+func boolField[T any](field func(*T) *bool) func(*T, PatchOperation) error {
+	return func(t *T, op PatchOperation) error { return patchBool(field(t), op) }
+}
+
+// int32Field patches an integer field; remove resets it to zero.
+func int32Field[T any](field func(*T) *int32) func(*T, PatchOperation) error {
+	return func(t *T, op PatchOperation) error { return patchInt32(field(t), op) }
+}
+
+// stringMapEntry patches one key of a string map.
+func stringMapEntry[T any](field func(*T) *map[string]string) func(*T, PatchOperation, string) error {
+	return func(t *T, op PatchOperation, key string) error {
+		m := field(t)
+		*m = patchStringMap(*m, op, key)
+
+		return nil
+	}
+}
+
+// boolMapEntry patches one key of a boolean map.
+func boolMapEntry[T any](field func(*T) *map[string]bool) func(*T, PatchOperation, string) error {
+	return func(t *T, op PatchOperation, key string) error {
+		m := field(t)
+
+		updated, err := patchBoolMap(*m, op, key)
+		if err != nil {
+			return err
+		}
+
+		*m = updated
+
+		return nil
+	}
+}
+
+// stringListEntry adds or removes one element of a string list.
+func stringListEntry[T any](field func(*T) *[]string) func(*T, PatchOperation, string) error {
+	return func(t *T, op PatchOperation, value string) error {
+		patchStringList(field(t), op, value)
+
+		return nil
+	}
+}
+
 func patchString(field *string, op PatchOperation) {
 	if op.Op == patchRemove {
 		*field = ""
@@ -69,7 +155,6 @@ func patchString(field *string, op PatchOperation) {
 	*field = op.Value
 }
 
-// patchBool sets a boolean field; remove resets it to false.
 func patchBool(field *bool, op PatchOperation) error {
 	if op.Op == patchRemove {
 		*field = false
@@ -79,7 +164,7 @@ func patchBool(field *bool, op PatchOperation) error {
 
 	v, err := strconv.ParseBool(op.Value)
 	if err != nil {
-		return &ServiceError{Code: errBadRequest, Message: fmt.Sprintf("Invalid boolean value '%s' for path '%s'.", op.Value, op.Path)}
+		return invalidPatchValue(op, "boolean")
 	}
 
 	*field = v
@@ -87,7 +172,6 @@ func patchBool(field *bool, op PatchOperation) error {
 	return nil
 }
 
-// patchInt32 sets an integer field; remove resets it to zero.
 func patchInt32(field *int32, op PatchOperation) error {
 	if op.Op == patchRemove {
 		*field = 0
@@ -97,7 +181,7 @@ func patchInt32(field *int32, op PatchOperation) error {
 
 	v, err := strconv.ParseInt(op.Value, 10, 32)
 	if err != nil {
-		return &ServiceError{Code: errBadRequest, Message: fmt.Sprintf("Invalid integer value '%s' for path '%s'.", op.Value, op.Path)}
+		return invalidPatchValue(op, "integer")
 	}
 
 	*field = int32(v)
@@ -105,28 +189,31 @@ func patchInt32(field *int32, op PatchOperation) error {
 	return nil
 }
 
-// patchStringMap adds, replaces or removes one key of a string map.
-func patchStringMap(m *map[string]string, op PatchOperation, key string) {
+// patchStringMap adds, replaces or removes one key of a string map and
+// returns the (possibly newly allocated) map.
+func patchStringMap(m map[string]string, op PatchOperation, key string) map[string]string {
 	if op.Op == patchRemove {
-		delete(*m, key)
+		delete(m, key)
 
-		return
+		return m
 	}
 
-	if *m == nil {
-		*m = make(map[string]string)
+	if m == nil {
+		m = make(map[string]string)
 	}
 
-	(*m)[key] = op.Value
+	m[key] = op.Value
+
+	return m
 }
 
 // patchBoolMap adds, replaces or removes one key of a boolean map. An add
 // without a value (as the console sends for request parameters) means false.
-func patchBoolMap(m *map[string]bool, op PatchOperation, key string) error {
+func patchBoolMap(m map[string]bool, op PatchOperation, key string) (map[string]bool, error) {
 	if op.Op == patchRemove {
-		delete(*m, key)
+		delete(m, key)
 
-		return nil
+		return m, nil
 	}
 
 	v := false
@@ -134,19 +221,19 @@ func patchBoolMap(m *map[string]bool, op PatchOperation, key string) error {
 	if op.Value != "" {
 		parsed, err := strconv.ParseBool(op.Value)
 		if err != nil {
-			return &ServiceError{Code: errBadRequest, Message: fmt.Sprintf("Invalid boolean value '%s' for path '%s'.", op.Value, op.Path)}
+			return nil, invalidPatchValue(op, "boolean")
 		}
 
 		v = parsed
 	}
 
-	if *m == nil {
-		*m = make(map[string]bool)
+	if m == nil {
+		m = make(map[string]bool)
 	}
 
-	(*m)[key] = v
+	m[key] = v
 
-	return nil
+	return m, nil
 }
 
 // patchStringList adds or removes one element of a string list (the path's
@@ -159,57 +246,34 @@ func patchStringList(list *[]string, op PatchOperation, value string) {
 	}
 }
 
-// UpdateRestAPI applies patch operations to a REST API.
-func (s *MemoryStorage) UpdateRestAPI(_ context.Context, restAPIID string, ops []PatchOperation) (*RestAPI, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	data, exists := s.RestAPIs[restAPIID]
-	if !exists {
-		return nil, &ServiceError{Code: errRestAPINotFound, Message: msgInvalidRestAPIID}
-	}
-
-	api := data.API.clone()
-
-	err := applyPatch(ops, func(op PatchOperation, segs []string) error {
-		switch {
-		case len(segs) == 1 && segs[0] == "name":
+var restAPIPatcher = &patcher[RestAPI]{
+	fields: map[string]func(*RestAPI, PatchOperation) error{
+		"name": func(a *RestAPI, op PatchOperation) error {
 			if op.Op == patchRemove || op.Value == "" {
 				return &ServiceError{Code: errBadRequest, Message: "Name is required"}
 			}
 
-			api.Name = op.Value
-		case len(segs) == 1 && segs[0] == "description":
-			patchString(&api.Description, op)
-		case len(segs) == 1 && segs[0] == "version":
-			patchString(&api.Version, op)
-		case len(segs) == 1 && segs[0] == "apiKeySource":
-			patchString(&api.APIKeySource, op)
-		case len(segs) == 1 && segs[0] == "policy":
-			patchString(&api.Policy, op)
-		case len(segs) == 1 && segs[0] == "disableExecuteApiEndpoint":
-			return patchBool(&api.DisableExecuteAPIEndpt, op)
-		case len(segs) == 1 && segs[0] == "minimumCompressionSize":
-			return patchMinimumCompressionSize(api, op)
-		case len(segs) == 2 && segs[0] == "binaryMediaTypes":
-			patchStringList(&api.BinaryMediaTypes, op, segs[1])
-		case len(segs) >= 2 && segs[0] == "endpointConfiguration":
-			return patchEndpointConfiguration(api, op, segs[1:])
-		default:
+			a.Name = op.Value
+
+			return nil
+		},
+		fieldDescription:            stringField(func(a *RestAPI) *string { return &a.Description }),
+		"version":                   stringField(func(a *RestAPI) *string { return &a.Version }),
+		"apiKeySource":              stringField(func(a *RestAPI) *string { return &a.APIKeySource }),
+		"policy":                    stringField(func(a *RestAPI) *string { return &a.Policy }),
+		"disableExecuteApiEndpoint": boolField(func(a *RestAPI) *bool { return &a.DisableExecuteAPIEndpt }),
+		"minimumCompressionSize":    patchMinimumCompressionSize,
+	},
+	entries: map[string]func(*RestAPI, PatchOperation, string) error{
+		"binaryMediaTypes": stringListEntry(func(a *RestAPI) *[]string { return &a.BinaryMediaTypes }),
+	},
+	fallback: func(a *RestAPI, op PatchOperation, segs []string) error {
+		if segs[0] != "endpointConfiguration" || len(segs) < 2 {
 			return invalidPatch(op)
 		}
 
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	data.API = api
-
-	s.saveLocked()
-
-	return api.clone(), nil
+		return patchEndpointConfiguration(a, op, segs[1:])
+	},
 }
 
 func patchMinimumCompressionSize(api *RestAPI, op PatchOperation) error {
@@ -230,7 +294,8 @@ func patchMinimumCompressionSize(api *RestAPI, op PatchOperation) error {
 }
 
 // patchEndpointConfiguration handles /endpointConfiguration/types/{index or
-// type} and /endpointConfiguration/vpcEndpointIds/{id}.
+// type}, /endpointConfiguration/vpcEndpointIds/{id} and
+// /endpointConfiguration/ipAddressType.
 func patchEndpointConfiguration(api *RestAPI, op PatchOperation, segs []string) error {
 	if api.EndpointConfiguration == nil {
 		api.EndpointConfiguration = &EndpointConfig{}
@@ -239,15 +304,11 @@ func patchEndpointConfiguration(api *RestAPI, op PatchOperation, segs []string) 
 	cfg := api.EndpointConfiguration
 
 	switch {
+	case len(segs) == 2 && segs[0] == "types" && op.Op == patchReplace:
+		// An API has exactly one endpoint type, so replacing any element
+		// replaces the type.
+		cfg.Types = []string{op.Value}
 	case len(segs) == 2 && segs[0] == "types":
-		// replace /endpointConfiguration/types/0 with the new type: an API
-		// has exactly one endpoint type.
-		if op.Op == patchReplace {
-			cfg.Types = []string{op.Value}
-
-			return nil
-		}
-
 		patchStringList(&cfg.Types, op, segs[1])
 	case len(segs) == 2 && segs[0] == "vpcEndpointIds":
 		patchStringList(&cfg.VpcEndpointIDs, op, segs[1])
@@ -260,373 +321,100 @@ func patchEndpointConfiguration(api *RestAPI, op PatchOperation, segs []string) 
 	return nil
 }
 
-// UpdateResource applies patch operations to a resource. Moving a resource
-// (/parentId) or renaming it (/pathPart) recomputes the paths of the
-// resource and its descendants.
-func (s *MemoryStorage) UpdateResource(_ context.Context, restAPIID, resourceID string, ops []PatchOperation) (*Resource, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	data, exists := s.RestAPIs[restAPIID]
-	if !exists {
-		return nil, &ServiceError{Code: errRestAPINotFound, Message: msgInvalidRestAPIID}
-	}
-
-	resource, exists := data.Resources[resourceID]
-	if !exists {
-		return nil, &ServiceError{Code: errResourceNotFound, Message: msgInvalidResourceID}
-	}
-
-	if resource.Path == "/" {
-		return nil, &ServiceError{Code: errBadRequest, Message: "Cannot update the root resource"}
-	}
-
-	parentID, pathPart := resource.ParentID, resource.PathPart
-
-	err := applyPatch(ops, func(op PatchOperation, segs []string) error {
-		if len(segs) != 1 || op.Op != patchReplace {
-			return invalidPatch(op)
-		}
-
-		switch segs[0] {
-		case "parentId":
-			if _, ok := data.Resources[op.Value]; !ok {
-				return &ServiceError{Code: errResourceNotFound, Message: msgInvalidResourceID}
-			}
-
-			parentID = op.Value
-		case "pathPart":
-			pathPart = op.Value
-		default:
-			return invalidPatch(op)
-		}
-
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	for id := parentID; id != ""; id = data.Resources[id].ParentID {
-		if id == resourceID {
-			return nil, &ServiceError{Code: errBadRequest, Message: "A resource cannot be moved under itself"}
-		}
-	}
-
-	resource.ParentID, resource.PathPart = parentID, pathPart
-	data.repathLocked(resource)
-
-	s.saveLocked()
-
-	return resource.clone(), nil
+var methodPatcher = &patcher[Method]{
+	fields: map[string]func(*Method, PatchOperation) error{
+		"authorizationType":  stringField(func(m *Method) *string { return &m.AuthorizationType }),
+		"authorizerId":       stringField(func(m *Method) *string { return &m.AuthorizerID }),
+		"apiKeyRequired":     boolField(func(m *Method) *bool { return &m.APIKeyRequired }),
+		"operationName":      stringField(func(m *Method) *string { return &m.OperationName }),
+		"requestValidatorId": stringField(func(m *Method) *string { return &m.RequestValidatorID }),
+	},
+	entries: map[string]func(*Method, PatchOperation, string) error{
+		fieldRequestParameters: boolMapEntry(func(m *Method) *map[string]bool { return &m.RequestParameters }),
+		"requestModels":        stringMapEntry(func(m *Method) *map[string]string { return &m.RequestModels }),
+		"authorizationScopes":  stringListEntry(func(m *Method) *[]string { return &m.AuthorizationScopes }),
+	},
 }
 
-// repathLocked recomputes the path of resource and of every descendant.
-func (d *RestAPIData) repathLocked(resource *Resource) {
-	resource.Path = buildPath(d.Resources[resource.ParentID].Path, resource.PathPart)
-
-	for _, child := range d.Resources {
-		if child.ParentID == resource.ID {
-			d.repathLocked(child)
-		}
-	}
+var integrationPatcher = &patcher[Integration]{
+	fields: map[string]func(*Integration, PatchOperation) error{
+		"type":                stringField(func(i *Integration) *string { return &i.Type }),
+		"httpMethod":          stringField(func(i *Integration) *string { return &i.HTTPMethod }),
+		"uri":                 stringField(func(i *Integration) *string { return &i.URI }),
+		"connectionType":      stringField(func(i *Integration) *string { return &i.ConnectionType }),
+		"connectionId":        stringField(func(i *Integration) *string { return &i.ConnectionID }),
+		"credentials":         stringField(func(i *Integration) *string { return &i.Credentials }),
+		"passthroughBehavior": stringField(func(i *Integration) *string { return &i.PassthroughBehavior }),
+		fieldContentHandling:  stringField(func(i *Integration) *string { return &i.ContentHandling }),
+		"cacheNamespace":      stringField(func(i *Integration) *string { return &i.CacheNamespace }),
+		"timeoutInMillis":     int32Field(func(i *Integration) *int32 { return &i.TimeoutInMillis }),
+	},
+	entries: map[string]func(*Integration, PatchOperation, string) error{
+		fieldRequestParameters: stringMapEntry(func(i *Integration) *map[string]string { return &i.RequestParameters }),
+		"requestTemplates":     stringMapEntry(func(i *Integration) *map[string]string { return &i.RequestTemplates }),
+		"cacheKeyParameters":   stringListEntry(func(i *Integration) *[]string { return &i.CacheKeyParameters }),
+	},
 }
 
-// UpdateMethod applies patch operations to a method.
-func (s *MemoryStorage) UpdateMethod(_ context.Context, restAPIID, resourceID, httpMethod string, ops []PatchOperation) (*Method, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+var methodResponsePatcher = &patcher[MethodResponse]{
+	entries: map[string]func(*MethodResponse, PatchOperation, string) error{
+		fieldResponseParameters: boolMapEntry(func(r *MethodResponse) *map[string]bool { return &r.ResponseParameters }),
+		"responseModels":        stringMapEntry(func(r *MethodResponse) *map[string]string { return &r.ResponseModels }),
+	},
+}
 
-	resource, method, err := s.methodLocked(restAPIID, resourceID, httpMethod)
-	if err != nil {
-		return nil, err
-	}
+var integrationResponsePatcher = &patcher[IntegrationResponse]{
+	fields: map[string]func(*IntegrationResponse, PatchOperation) error{
+		"selectionPattern":   stringField(func(r *IntegrationResponse) *string { return &r.SelectionPattern }),
+		fieldContentHandling: stringField(func(r *IntegrationResponse) *string { return &r.ContentHandling }),
+	},
+	entries: map[string]func(*IntegrationResponse, PatchOperation, string) error{
+		fieldResponseParameters: stringMapEntry(func(r *IntegrationResponse) *map[string]string { return &r.ResponseParameters }),
+		"responseTemplates":     stringMapEntry(func(r *IntegrationResponse) *map[string]string { return &r.ResponseTemplates }),
+	},
+}
 
-	updated := method.clone()
+var deploymentPatcher = &patcher[Deployment]{
+	fields: map[string]func(*Deployment, PatchOperation) error{
+		fieldDescription: stringField(func(d *Deployment) *string { return &d.Description }),
+	},
+}
 
-	err = applyPatch(ops, func(op PatchOperation, segs []string) error {
+// stagePatcher covers a stage's deployment, description, variables,
+// tracing, cache cluster, access log settings and per-method settings
+// (/{resourcePath}/{httpMethod}/{group}/{setting}). The deploymentId must
+// name a deployment of the REST API, which UpdateStage checks first.
+var stagePatcher = &patcher[Stage]{
+	fields: map[string]func(*Stage, PatchOperation) error{
+		"deploymentId":        stringField(func(s *Stage) *string { return &s.DeploymentID }),
+		fieldDescription:      stringField(func(s *Stage) *string { return &s.Description }),
+		"cacheClusterEnabled": boolField(func(s *Stage) *bool { return &s.CacheClusterEnabled }),
+		"cacheClusterSize":    stringField(func(s *Stage) *string { return &s.CacheClusterSize }),
+		"tracingEnabled":      boolField(func(s *Stage) *bool { return &s.TracingEnabled }),
+		// Accepted for compatibility; kumo does not model these.
+		"clientCertificateId":  func(*Stage, PatchOperation) error { return nil },
+		"documentationVersion": func(*Stage, PatchOperation) error { return nil },
+		"webAclArn":            func(*Stage, PatchOperation) error { return nil },
+	},
+	entries: map[string]func(*Stage, PatchOperation, string) error{
+		"variables": stringMapEntry(func(s *Stage) *map[string]string { return &s.Variables }),
+	},
+	fallback: func(s *Stage, op PatchOperation, segs []string) error {
 		switch {
-		case len(segs) == 1 && segs[0] == "authorizationType":
-			patchString(&updated.AuthorizationType, op)
-		case len(segs) == 1 && segs[0] == "authorizerId":
-			patchString(&updated.AuthorizerID, op)
-		case len(segs) == 1 && segs[0] == "apiKeyRequired":
-			return patchBool(&updated.APIKeyRequired, op)
-		case len(segs) == 1 && segs[0] == "operationName":
-			patchString(&updated.OperationName, op)
-		case len(segs) == 1 && segs[0] == "requestValidatorId":
-			patchString(&updated.RequestValidatorID, op)
-		case len(segs) == 2 && segs[0] == "requestParameters":
-			return patchBoolMap(&updated.RequestParameters, op, segs[1])
-		case len(segs) == 2 && segs[0] == "requestModels":
-			patchStringMap(&updated.RequestModels, op, segs[1])
-		case len(segs) == 2 && segs[0] == "authorizationScopes":
-			patchStringList(&updated.AuthorizationScopes, op, segs[1])
-		default:
-			return invalidPatch(op)
-		}
-
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	resource.ResourceMethods[httpMethod] = *updated
-
-	s.saveLocked()
-
-	return updated.clone(), nil
-}
-
-// UpdateIntegration applies patch operations to a method's integration.
-func (s *MemoryStorage) UpdateIntegration(_ context.Context, restAPIID, resourceID, httpMethod string, ops []PatchOperation) (*Integration, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	resource, method, err := s.integrationLocked(restAPIID, resourceID, httpMethod)
-	if err != nil {
-		return nil, err
-	}
-
-	updated := method.MethodIntegration.clone()
-
-	err = applyPatch(ops, func(op PatchOperation, segs []string) error {
-		switch {
-		case len(segs) == 1 && segs[0] == "type":
-			patchString(&updated.Type, op)
-		case len(segs) == 1 && segs[0] == "httpMethod":
-			patchString(&updated.HTTPMethod, op)
-		case len(segs) == 1 && segs[0] == "uri":
-			patchString(&updated.URI, op)
-		case len(segs) == 1 && segs[0] == "connectionType":
-			patchString(&updated.ConnectionType, op)
-		case len(segs) == 1 && segs[0] == "connectionId":
-			patchString(&updated.ConnectionID, op)
-		case len(segs) == 1 && segs[0] == "credentials":
-			patchString(&updated.Credentials, op)
-		case len(segs) == 1 && segs[0] == "passthroughBehavior":
-			patchString(&updated.PassthroughBehavior, op)
-		case len(segs) == 1 && segs[0] == "contentHandling":
-			patchString(&updated.ContentHandling, op)
-		case len(segs) == 1 && segs[0] == "cacheNamespace":
-			patchString(&updated.CacheNamespace, op)
-		case len(segs) == 1 && segs[0] == "timeoutInMillis":
-			return patchInt32(&updated.TimeoutInMillis, op)
-		case len(segs) == 2 && segs[0] == "requestParameters":
-			patchStringMap(&updated.RequestParameters, op, segs[1])
-		case len(segs) == 2 && segs[0] == "requestTemplates":
-			patchStringMap(&updated.RequestTemplates, op, segs[1])
-		case len(segs) == 2 && segs[0] == "cacheKeyParameters":
-			patchStringList(&updated.CacheKeyParameters, op, segs[1])
-		default:
-			return invalidPatch(op)
-		}
-
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	method.MethodIntegration = updated
-	resource.ResourceMethods[httpMethod] = method
-
-	s.saveLocked()
-
-	return updated.clone(), nil
-}
-
-// UpdateMethodResponse applies patch operations to a method response.
-func (s *MemoryStorage) UpdateMethodResponse(_ context.Context, restAPIID, resourceID, httpMethod, statusCode string, ops []PatchOperation) (*MethodResponse, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	_, method, err := s.methodLocked(restAPIID, resourceID, httpMethod)
-	if err != nil {
-		return nil, err
-	}
-
-	current, exists := method.MethodResponses[statusCode]
-	if !exists {
-		return nil, &ServiceError{Code: errMethodNotFound, Message: msgInvalidStatusCode}
-	}
-
-	updated := current.clone()
-
-	err = applyPatch(ops, func(op PatchOperation, segs []string) error {
-		switch {
-		case len(segs) == 2 && segs[0] == "responseParameters":
-			return patchBoolMap(&updated.ResponseParameters, op, segs[1])
-		case len(segs) == 2 && segs[0] == "responseModels":
-			patchStringMap(&updated.ResponseModels, op, segs[1])
-		default:
-			return invalidPatch(op)
-		}
-
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	method.MethodResponses[statusCode] = updated
-
-	s.saveLocked()
-
-	return updated.clone(), nil
-}
-
-// UpdateIntegrationResponse applies patch operations to an integration response.
-func (s *MemoryStorage) UpdateIntegrationResponse(_ context.Context, restAPIID, resourceID, httpMethod, statusCode string, ops []PatchOperation) (*IntegrationResponse, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	_, method, err := s.integrationLocked(restAPIID, resourceID, httpMethod)
-	if err != nil {
-		return nil, err
-	}
-
-	current, exists := method.MethodIntegration.IntegrationResponses[statusCode]
-	if !exists {
-		return nil, &ServiceError{Code: errMethodNotFound, Message: msgInvalidStatusCode}
-	}
-
-	updated := current.clone()
-
-	err = applyPatch(ops, func(op PatchOperation, segs []string) error {
-		switch {
-		case len(segs) == 1 && segs[0] == "selectionPattern":
-			patchString(&updated.SelectionPattern, op)
-		case len(segs) == 1 && segs[0] == "contentHandling":
-			patchString(&updated.ContentHandling, op)
-		case len(segs) == 2 && segs[0] == "responseParameters":
-			patchStringMap(&updated.ResponseParameters, op, segs[1])
-		case len(segs) == 2 && segs[0] == "responseTemplates":
-			patchStringMap(&updated.ResponseTemplates, op, segs[1])
-		default:
-			return invalidPatch(op)
-		}
-
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	method.MethodIntegration.IntegrationResponses[statusCode] = updated
-
-	s.saveLocked()
-
-	return updated.clone(), nil
-}
-
-// UpdateDeployment applies patch operations to a deployment.
-func (s *MemoryStorage) UpdateDeployment(_ context.Context, restAPIID, deploymentID string, ops []PatchOperation) (*Deployment, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	data, exists := s.RestAPIs[restAPIID]
-	if !exists {
-		return nil, &ServiceError{Code: errRestAPINotFound, Message: msgInvalidRestAPIID}
-	}
-
-	deployment, exists := data.Deployments[deploymentID]
-	if !exists {
-		return nil, &ServiceError{Code: errDeploymentNotFound, Message: msgInvalidDeploymentID}
-	}
-
-	updated := *deployment
-
-	err := applyPatch(ops, func(op PatchOperation, segs []string) error {
-		if len(segs) != 1 || segs[0] != "description" {
-			return invalidPatch(op)
-		}
-
-		patchString(&updated.Description, op)
-
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	*deployment = updated
-
-	s.saveLocked()
-
-	return &updated, nil
-}
-
-// UpdateStage applies patch operations to a stage: its deployment,
-// description, variables, tracing, access log settings, cache cluster and
-// per-method settings (/{resourcePath}/{httpMethod}/{group}/{setting}).
-func (s *MemoryStorage) UpdateStage(_ context.Context, restAPIID, stageName string, ops []PatchOperation) (*Stage, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	data, exists := s.RestAPIs[restAPIID]
-	if !exists {
-		return nil, &ServiceError{Code: errRestAPINotFound, Message: msgInvalidRestAPIID}
-	}
-
-	stage, exists := data.Stages[stageName]
-	if !exists {
-		return nil, &ServiceError{Code: errStageNotFound, Message: "Invalid stage identifier specified"}
-	}
-
-	updated := stage.clone()
-
-	err := applyPatch(ops, func(op PatchOperation, segs []string) error {
-		switch {
-		case len(segs) == 1 && segs[0] == "deploymentId":
-			if _, ok := data.Deployments[op.Value]; !ok {
-				return &ServiceError{Code: errDeploymentNotFound, Message: msgInvalidDeploymentID}
-			}
-
-			updated.DeploymentID = op.Value
-		case len(segs) == 1 && segs[0] == "description":
-			patchString(&updated.Description, op)
-		case len(segs) == 1 && segs[0] == "cacheClusterEnabled":
-			return patchBool(&updated.CacheClusterEnabled, op)
-		case len(segs) == 1 && segs[0] == "cacheClusterSize":
-			patchString(&updated.CacheClusterSize, op)
-		case len(segs) == 1 && segs[0] == "tracingEnabled":
-			return patchBool(&updated.TracingEnabled, op)
-		case len(segs) == 2 && segs[0] == "variables":
-			patchStringMap(&updated.Variables, op, segs[1])
 		case segs[0] == "accessLogSettings":
-			return patchAccessLogSettings(updated, op, segs[1:])
+			return patchAccessLogSettings(s, op, segs[1:])
 		case len(segs) == 4:
-			return patchMethodSetting(updated, op, segs)
-		case len(segs) == 1 && (segs[0] == "clientCertificateId" || segs[0] == "documentationVersion" || segs[0] == "webAclArn"):
-			// Accepted for compatibility; kumo does not model these.
+			return patchMethodSetting(s, op, segs)
 		default:
 			return invalidPatch(op)
 		}
-
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	updated.LastUpdatedDate = time.Now()
-	data.Stages[stageName] = updated
-
-	s.saveLocked()
-
-	return updated.clone(), nil
+	},
 }
 
 // patchAccessLogSettings handles /accessLogSettings (remove) and
 // /accessLogSettings/{destinationArn,format}.
 func patchAccessLogSettings(stage *Stage, op PatchOperation, segs []string) error {
-	if len(segs) == 0 {
-		if op.Op != patchRemove {
-			return invalidPatch(op)
-		}
-
+	if len(segs) == 0 && op.Op == patchRemove {
 		stage.AccessLogSettings = nil
 
 		return nil
@@ -656,6 +444,34 @@ func patchAccessLogSettings(stage *Stage, op PatchOperation, segs []string) erro
 	return nil
 }
 
+// methodSettingFields maps the {group}/{setting} tail of a method settings
+// patch path to the field it sets.
+var methodSettingFields = map[string]func(*MethodSetting, PatchOperation) error{
+	"metrics/enabled":       boolField(func(m *MethodSetting) *bool { return &m.MetricsEnabled }),
+	"logging/loglevel":      stringField(func(m *MethodSetting) *string { return &m.LoggingLevel }),
+	"logging/dataTrace":     boolField(func(m *MethodSetting) *bool { return &m.DataTraceEnabled }),
+	"caching/enabled":       boolField(func(m *MethodSetting) *bool { return &m.CachingEnabled }),
+	"caching/ttlInSeconds":  int32Field(func(m *MethodSetting) *int32 { return &m.CacheTTLInSeconds }),
+	"caching/dataEncrypted": boolField(func(m *MethodSetting) *bool { return &m.CacheDataEncrypted }),
+	"caching/requireAuthorizationForCacheControl": boolField(func(m *MethodSetting) *bool {
+		return &m.RequireAuthorizationForCacheControl
+	}),
+	"caching/unauthorizedCacheControlHeaderStrategy": stringField(func(m *MethodSetting) *string {
+		return &m.UnauthorizedCacheControlHeaderStrategy
+	}),
+	"throttling/burstLimit": int32Field(func(m *MethodSetting) *int32 { return &m.ThrottlingBurstLimit }),
+	"throttling/rateLimit": func(m *MethodSetting, op PatchOperation) error {
+		v, err := strconv.ParseFloat(op.Value, 64)
+		if err != nil {
+			return invalidPatchValue(op, "number")
+		}
+
+		m.ThrottlingRateLimit = v
+
+		return nil
+	},
+}
+
 // patchMethodSetting handles /{resourcePath}/{httpMethod}/{group}/{setting},
 // e.g. /*/*/metrics/enabled or /~1items/GET/throttling/burstLimit. A remove
 // of any setting drops the whole method settings block, as AWS does.
@@ -668,6 +484,11 @@ func patchMethodSetting(stage *Stage, op PatchOperation, segs []string) error {
 		return nil
 	}
 
+	set, ok := methodSettingFields[segs[2]+"/"+segs[3]]
+	if !ok {
+		return invalidPatch(op)
+	}
+
 	if stage.MethodSettings == nil {
 		stage.MethodSettings = make(map[string]*MethodSetting)
 	}
@@ -678,292 +499,257 @@ func patchMethodSetting(stage *Stage, op PatchOperation, segs []string) error {
 		stage.MethodSettings[key] = setting
 	}
 
-	switch segs[2] + "/" + segs[3] {
-	case "metrics/enabled":
-		return patchBool(&setting.MetricsEnabled, op)
-	case "logging/loglevel":
-		patchString(&setting.LoggingLevel, op)
-	case "logging/dataTrace":
-		return patchBool(&setting.DataTraceEnabled, op)
-	case "throttling/burstLimit":
-		return patchInt32(&setting.ThrottlingBurstLimit, op)
-	case "throttling/rateLimit":
-		v, err := strconv.ParseFloat(op.Value, 64)
-		if err != nil {
-			return invalidPatch(op)
-		}
-
-		setting.ThrottlingRateLimit = v
-	case "caching/enabled":
-		return patchBool(&setting.CachingEnabled, op)
-	case "caching/ttlInSeconds":
-		return patchInt32(&setting.CacheTTLInSeconds, op)
-	case "caching/dataEncrypted":
-		return patchBool(&setting.CacheDataEncrypted, op)
-	case "caching/requireAuthorizationForCacheControl":
-		return patchBool(&setting.RequireAuthorizationForCacheControl, op)
-	case "caching/unauthorizedCacheControlHeaderStrategy":
-		patchString(&setting.UnauthorizedCacheControlHeaderStrategy, op)
-	default:
-		return invalidPatch(op)
-	}
-
-	return nil
+	return set(setting, op)
 }
 
-func (a *RestAPI) clone() *RestAPI {
-	out := *a
-	out.Tags = maps.Clone(a.Tags)
-	out.BinaryMediaTypes = slices.Clone(a.BinaryMediaTypes)
+// UpdateRestAPI applies patch operations to a REST API.
+func (s *MemoryStorage) UpdateRestAPI(_ context.Context, restAPIID string, ops []PatchOperation) (*RestAPI, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	if a.EndpointConfiguration != nil {
-		cfg := *a.EndpointConfiguration
-		cfg.Types = slices.Clone(cfg.Types)
-		cfg.VpcEndpointIDs = slices.Clone(cfg.VpcEndpointIDs)
-		out.EndpointConfiguration = &cfg
+	data, exists := s.RestAPIs[restAPIID]
+	if !exists {
+		return nil, &ServiceError{Code: errRestAPINotFound, Message: msgInvalidRestAPIID}
 	}
 
-	if a.MinimumCompressionSize != nil {
-		v := *a.MinimumCompressionSize
-		out.MinimumCompressionSize = &v
+	api := data.API.clone()
+	if err := restAPIPatcher.apply(api, ops); err != nil {
+		return nil, err
 	}
 
-	return &out
+	data.API = api
+
+	s.saveLocked()
+
+	return api.clone(), nil
 }
 
-func (r *Resource) clone() *Resource {
-	out := *r
-	out.ResourceMethods = make(map[string]Method, len(r.ResourceMethods))
+// UpdateResource applies patch operations to a resource. Moving a resource
+// (/parentId) or renaming it (/pathPart) recomputes the paths of the
+// resource and its descendants.
+func (s *MemoryStorage) UpdateResource(_ context.Context, restAPIID, resourceID string, ops []PatchOperation) (*Resource, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	for k, m := range r.ResourceMethods {
-		out.ResourceMethods[k] = *m.clone()
+	data, exists := s.RestAPIs[restAPIID]
+	if !exists {
+		return nil, &ServiceError{Code: errRestAPINotFound, Message: msgInvalidRestAPIID}
 	}
 
-	return &out
-}
+	resource, exists := data.Resources[resourceID]
+	if !exists {
+		return nil, &ServiceError{Code: errResourceNotFound, Message: msgInvalidResourceID}
+	}
 
-func (m *Method) clone() *Method {
-	out := *m
-	out.RequestParameters = maps.Clone(m.RequestParameters)
-	out.RequestModels = maps.Clone(m.RequestModels)
-	out.AuthorizationScopes = slices.Clone(m.AuthorizationScopes)
+	if resource.Path == "/" {
+		return nil, &ServiceError{Code: errBadRequest, Message: "Cannot update the root resource"}
+	}
 
-	if m.MethodResponses != nil {
-		out.MethodResponses = make(map[string]*MethodResponse, len(m.MethodResponses))
-		for k, r := range m.MethodResponses {
-			out.MethodResponses[k] = r.clone()
+	target := Resource{ParentID: resource.ParentID, PathPart: resource.PathPart}
+	resourcePatcher := &patcher[Resource]{fields: map[string]func(*Resource, PatchOperation) error{
+		"parentId": func(r *Resource, op PatchOperation) error {
+			if _, ok := data.Resources[op.Value]; !ok || op.Op != patchReplace {
+				return &ServiceError{Code: errResourceNotFound, Message: msgInvalidResourceID}
+			}
+
+			r.ParentID = op.Value
+
+			return nil
+		},
+		"pathPart": stringField(func(r *Resource) *string { return &r.PathPart }),
+	}}
+
+	if err := resourcePatcher.apply(&target, ops); err != nil {
+		return nil, err
+	}
+
+	for id := target.ParentID; id != ""; id = data.Resources[id].ParentID {
+		if id == resourceID {
+			return nil, &ServiceError{Code: errBadRequest, Message: "A resource cannot be moved under itself"}
 		}
 	}
 
-	if m.MethodIntegration != nil {
-		out.MethodIntegration = m.MethodIntegration.clone()
-	}
+	resource.ParentID, resource.PathPart = target.ParentID, target.PathPart
+	data.repathLocked(resource)
 
-	return &out
+	s.saveLocked()
+
+	return resource.clone(), nil
 }
 
-func (i *Integration) clone() *Integration {
-	out := *i
-	out.CacheKeyParameters = slices.Clone(i.CacheKeyParameters)
-	out.RequestParameters = maps.Clone(i.RequestParameters)
-	out.RequestTemplates = maps.Clone(i.RequestTemplates)
+// repathLocked recomputes the path of resource and of every descendant.
+func (d *RestAPIData) repathLocked(resource *Resource) {
+	resource.Path = buildPath(d.Resources[resource.ParentID].Path, resource.PathPart)
 
-	if i.IntegrationResponses != nil {
-		out.IntegrationResponses = make(map[string]*IntegrationResponse, len(i.IntegrationResponses))
-		for k, r := range i.IntegrationResponses {
-			out.IntegrationResponses[k] = r.clone()
+	for _, child := range d.Resources {
+		if child.ParentID == resource.ID {
+			d.repathLocked(child)
+		}
+	}
+}
+
+// UpdateMethod applies patch operations to a method.
+func (s *MemoryStorage) UpdateMethod(_ context.Context, restAPIID, resourceID, httpMethod string, ops []PatchOperation) (*Method, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	resource, method, err := s.methodLocked(restAPIID, resourceID, httpMethod)
+	if err != nil {
+		return nil, err
+	}
+
+	updated := method.clone()
+	if err := methodPatcher.apply(updated, ops); err != nil {
+		return nil, err
+	}
+
+	resource.ResourceMethods[httpMethod] = *updated
+
+	s.saveLocked()
+
+	return updated.clone(), nil
+}
+
+// UpdateIntegration applies patch operations to a method's integration.
+func (s *MemoryStorage) UpdateIntegration(_ context.Context, restAPIID, resourceID, httpMethod string, ops []PatchOperation) (*Integration, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	resource, method, err := s.integrationLocked(restAPIID, resourceID, httpMethod)
+	if err != nil {
+		return nil, err
+	}
+
+	updated := method.MethodIntegration.clone()
+	if err := integrationPatcher.apply(updated, ops); err != nil {
+		return nil, err
+	}
+
+	method.MethodIntegration = updated
+	resource.ResourceMethods[httpMethod] = method
+
+	s.saveLocked()
+
+	return updated.clone(), nil
+}
+
+// UpdateMethodResponse applies patch operations to a method response.
+func (s *MemoryStorage) UpdateMethodResponse(_ context.Context, restAPIID, resourceID, httpMethod, statusCode string, ops []PatchOperation) (*MethodResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, method, err := s.methodLocked(restAPIID, resourceID, httpMethod)
+	if err != nil {
+		return nil, err
+	}
+
+	current, exists := method.MethodResponses[statusCode]
+	if !exists {
+		return nil, &ServiceError{Code: errMethodNotFound, Message: msgInvalidStatusCode}
+	}
+
+	updated := current.clone()
+	if err := methodResponsePatcher.apply(updated, ops); err != nil {
+		return nil, err
+	}
+
+	method.MethodResponses[statusCode] = updated
+
+	s.saveLocked()
+
+	return updated.clone(), nil
+}
+
+// UpdateIntegrationResponse applies patch operations to an integration response.
+func (s *MemoryStorage) UpdateIntegrationResponse(_ context.Context, restAPIID, resourceID, httpMethod, statusCode string, ops []PatchOperation) (*IntegrationResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, method, err := s.integrationLocked(restAPIID, resourceID, httpMethod)
+	if err != nil {
+		return nil, err
+	}
+
+	current, exists := method.MethodIntegration.IntegrationResponses[statusCode]
+	if !exists {
+		return nil, &ServiceError{Code: errMethodNotFound, Message: msgInvalidStatusCode}
+	}
+
+	updated := current.clone()
+	if err := integrationResponsePatcher.apply(updated, ops); err != nil {
+		return nil, err
+	}
+
+	method.MethodIntegration.IntegrationResponses[statusCode] = updated
+
+	s.saveLocked()
+
+	return updated.clone(), nil
+}
+
+// UpdateDeployment applies patch operations to a deployment.
+func (s *MemoryStorage) UpdateDeployment(_ context.Context, restAPIID, deploymentID string, ops []PatchOperation) (*Deployment, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	data, exists := s.RestAPIs[restAPIID]
+	if !exists {
+		return nil, &ServiceError{Code: errRestAPINotFound, Message: msgInvalidRestAPIID}
+	}
+
+	deployment, exists := data.Deployments[deploymentID]
+	if !exists {
+		return nil, &ServiceError{Code: errDeploymentNotFound, Message: msgInvalidDeploymentID}
+	}
+
+	updated := *deployment
+	if err := deploymentPatcher.apply(&updated, ops); err != nil {
+		return nil, err
+	}
+
+	*deployment = updated
+
+	s.saveLocked()
+
+	return &updated, nil
+}
+
+// UpdateStage applies patch operations to a stage. /deploymentId must name a
+// deployment of the same REST API.
+func (s *MemoryStorage) UpdateStage(_ context.Context, restAPIID, stageName string, ops []PatchOperation) (*Stage, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	data, exists := s.RestAPIs[restAPIID]
+	if !exists {
+		return nil, &ServiceError{Code: errRestAPINotFound, Message: msgInvalidRestAPIID}
+	}
+
+	stage, exists := data.Stages[stageName]
+	if !exists {
+		return nil, &ServiceError{Code: errStageNotFound, Message: msgInvalidStageID}
+	}
+
+	updated := stage.clone()
+
+	for _, op := range ops {
+		if op.Path != "/deploymentId" {
+			continue
+		}
+
+		if _, ok := data.Deployments[op.Value]; !ok {
+			return nil, &ServiceError{Code: errDeploymentNotFound, Message: msgInvalidDeploymentID}
 		}
 	}
 
-	return &out
-}
-
-func (st *Stage) clone() *Stage {
-	out := *st
-	out.Tags = maps.Clone(st.Tags)
-	out.Variables = maps.Clone(st.Variables)
-
-	if st.AccessLogSettings != nil {
-		a := *st.AccessLogSettings
-		out.AccessLogSettings = &a
+	if err := stagePatcher.apply(updated, ops); err != nil {
+		return nil, err
 	}
 
-	if st.MethodSettings != nil {
-		out.MethodSettings = make(map[string]*MethodSetting, len(st.MethodSettings))
-		for k, v := range st.MethodSettings {
-			ms := *v
-			out.MethodSettings[k] = &ms
-		}
-	}
+	updated.LastUpdatedDate = time.Now()
+	data.Stages[stageName] = updated
 
-	return &out
-}
+	s.saveLocked()
 
-// readPatch decodes the patchOperations of an Update* request; on failure the
-// error response has been written.
-func readPatch(w http.ResponseWriter, r *http.Request) ([]PatchOperation, bool) {
-	var req UpdateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, errBadRequest, "Invalid request body", http.StatusBadRequest)
-
-		return nil, false
-	}
-
-	return req.PatchOperations, true
-}
-
-// UpdateRestAPI handles the UpdateRestApi API.
-func (s *Service) UpdateRestAPI(w http.ResponseWriter, r *http.Request) {
-	ops, ok := readPatch(w, r)
-	if !ok {
-		return
-	}
-
-	api, err := s.storage.UpdateRestAPI(r.Context(), extractDeploymentRestAPIID(r.URL.Path), ops)
-	if err != nil {
-		handleError(w, err)
-
-		return
-	}
-
-	writeResponse(w, toRestAPIResponse(api), http.StatusOK)
-}
-
-// UpdateResource handles the UpdateResource API.
-func (s *Service) UpdateResource(w http.ResponseWriter, r *http.Request) {
-	ops, ok := readPatch(w, r)
-	if !ok {
-		return
-	}
-
-	restAPIID, resourceID := extractRestAPIAndResourceID(r.URL.Path)
-
-	resource, err := s.storage.UpdateResource(r.Context(), restAPIID, resourceID, ops)
-	if err != nil {
-		handleError(w, err)
-
-		return
-	}
-
-	writeResponse(w, toResourceResponse(resource), http.StatusOK)
-}
-
-// UpdateMethod handles the UpdateMethod API.
-func (s *Service) UpdateMethod(w http.ResponseWriter, r *http.Request) {
-	ops, ok := readPatch(w, r)
-	if !ok {
-		return
-	}
-
-	restAPIID, resourceID, httpMethod := extractMethodParams(r.URL.Path)
-
-	method, err := s.storage.UpdateMethod(r.Context(), restAPIID, resourceID, httpMethod, ops)
-	if err != nil {
-		handleError(w, err)
-
-		return
-	}
-
-	writeResponse(w, toMethodOutput(method), http.StatusOK)
-}
-
-// UpdateIntegration handles the UpdateIntegration API.
-func (s *Service) UpdateIntegration(w http.ResponseWriter, r *http.Request) {
-	ops, ok := readPatch(w, r)
-	if !ok {
-		return
-	}
-
-	restAPIID, resourceID, httpMethod := extractIntegrationParams(r.URL.Path)
-
-	integration, err := s.storage.UpdateIntegration(r.Context(), restAPIID, resourceID, httpMethod, ops)
-	if err != nil {
-		handleError(w, err)
-
-		return
-	}
-
-	writeResponse(w, toIntegrationOutput(integration), http.StatusOK)
-}
-
-// UpdateMethodResponse handles the UpdateMethodResponse API.
-func (s *Service) UpdateMethodResponse(w http.ResponseWriter, r *http.Request) {
-	restAPIID, resourceID, httpMethod, statusCode, ok := responseIDs(w, r, false)
-	if !ok {
-		return
-	}
-
-	ops, ok := readPatch(w, r)
-	if !ok {
-		return
-	}
-
-	resp, err := s.storage.UpdateMethodResponse(r.Context(), restAPIID, resourceID, httpMethod, statusCode, ops)
-	if err != nil {
-		handleError(w, err)
-
-		return
-	}
-
-	writeResponse(w, resp, http.StatusOK)
-}
-
-// UpdateIntegrationResponse handles the UpdateIntegrationResponse API.
-func (s *Service) UpdateIntegrationResponse(w http.ResponseWriter, r *http.Request) {
-	restAPIID, resourceID, httpMethod, statusCode, ok := responseIDs(w, r, true)
-	if !ok {
-		return
-	}
-
-	ops, ok := readPatch(w, r)
-	if !ok {
-		return
-	}
-
-	resp, err := s.storage.UpdateIntegrationResponse(r.Context(), restAPIID, resourceID, httpMethod, statusCode, ops)
-	if err != nil {
-		handleError(w, err)
-
-		return
-	}
-
-	writeResponse(w, resp, http.StatusOK)
-}
-
-// UpdateDeployment handles the UpdateDeployment API.
-func (s *Service) UpdateDeployment(w http.ResponseWriter, r *http.Request) {
-	ops, ok := readPatch(w, r)
-	if !ok {
-		return
-	}
-
-	restAPIID, deploymentID := extractRestAPIAndDeploymentID(r.URL.Path)
-
-	deployment, err := s.storage.UpdateDeployment(r.Context(), restAPIID, deploymentID, ops)
-	if err != nil {
-		handleError(w, err)
-
-		return
-	}
-
-	writeResponse(w, toDeploymentResponse(deployment), http.StatusOK)
-}
-
-// UpdateStage handles the UpdateStage API.
-func (s *Service) UpdateStage(w http.ResponseWriter, r *http.Request) {
-	ops, ok := readPatch(w, r)
-	if !ok {
-		return
-	}
-
-	restAPIID, stageName := extractRestAPIAndStageName(r.URL.Path)
-
-	stage, err := s.storage.UpdateStage(r.Context(), restAPIID, stageName, ops)
-	if err != nil {
-		handleError(w, err)
-
-		return
-	}
-
-	writeResponse(w, toStageResponse(stage), http.StatusOK)
+	return updated.clone(), nil
 }

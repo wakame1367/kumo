@@ -8,6 +8,11 @@ import (
 	"testing"
 )
 
+const (
+	spaIndexPath = "/index.html"
+	spaBody      = "<h1>app</h1>"
+)
+
 // newSPADistribution creates a distribution in front of a fake origin that
 // serves /index.html and 404s everything else, configured like a typical
 // single-page app: DefaultRootObject plus a 404 -> /index.html (200) custom
@@ -16,9 +21,9 @@ func newSPADistribution(t *testing.T, responseCode string) (*Service, string) {
 	t.Helper()
 
 	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/index.html" {
+		if r.URL.Path == spaIndexPath {
 			w.Header().Set("Content-Type", "text/html")
-			_, _ = w.Write([]byte("<h1>app</h1>"))
+			_, _ = w.Write([]byte(spaBody))
 
 			return
 		}
@@ -41,7 +46,7 @@ func newSPADistribution(t *testing.T, responseCode string) (*Service, string) {
 		}}}},
 		DefaultCacheBehavior: &DefaultCacheBehaviorXML{TargetOriginID: "app"},
 		CustomErrorResponses: &CustomErrorResponsesXML{Quantity: 1, Items: []CustomErrorResponseXML{
-			{ErrorCode: http.StatusNotFound, ResponsePagePath: "/index.html", ResponseCode: responseCode},
+			{ErrorCode: http.StatusNotFound, ResponsePagePath: spaIndexPath, ResponseCode: responseCode},
 		}},
 	})
 	if err != nil {
@@ -69,7 +74,7 @@ func TestEdge_DefaultRootObject(t *testing.T) {
 
 	svc, distID := newSPADistribution(t, "200")
 
-	if w := edgeRequest(t, svc, distID, http.MethodGet, ""); w.Code != http.StatusOK || w.Body.String() != "<h1>app</h1>" {
+	if w := edgeRequest(t, svc, distID, http.MethodGet, ""); w.Code != http.StatusOK || w.Body.String() != spaBody {
 		t.Errorf("GET / = %d %q, want the default root object", w.Code, w.Body.String())
 	}
 }
@@ -80,12 +85,12 @@ func TestEdge_CustomErrorResponse(t *testing.T) {
 	svc, distID := newSPADistribution(t, "200")
 
 	w := edgeRequest(t, svc, distID, http.MethodGet, "deep/link")
-	if w.Code != http.StatusOK || w.Body.String() != "<h1>app</h1>" || w.Header().Get("Content-Type") != "text/html" {
+	if w.Code != http.StatusOK || w.Body.String() != spaBody || w.Header().Get("Content-Type") != "text/html" {
 		t.Errorf("GET /deep/link = %d %q (%s), want the error page with 200", w.Code, w.Body.String(), w.Header().Get("Content-Type"))
 	}
 
 	keep, keepID := newSPADistribution(t, "")
-	if w := edgeRequest(t, keep, keepID, http.MethodGet, "missing"); w.Code != http.StatusNotFound || w.Body.String() != "<h1>app</h1>" {
+	if w := edgeRequest(t, keep, keepID, http.MethodGet, "missing"); w.Code != http.StatusNotFound || w.Body.String() != spaBody {
 		t.Errorf("empty ResponseCode must keep the origin status: %d %q", w.Code, w.Body.String())
 	}
 }
@@ -105,8 +110,13 @@ func TestEdge_OptionsPassesThrough(t *testing.T) {
 
 	svc := setupEdge(t, origin.URL)
 
+	mem, ok := svc.storage.(*MemoryStorage)
+	if !ok {
+		t.Fatalf("storage is %T", svc.storage)
+	}
+
 	var distID string
-	for id := range svc.storage.(*MemoryStorage).Distributions {
+	for id := range mem.Distributions {
 		distID = id
 	}
 

@@ -65,6 +65,13 @@ func (c *apiClient) call(method, path string, body any, want int, out any) {
 	}
 }
 
+const (
+	allowOriginParam = "method.response.header.Access-Control-Allow-Origin"
+	allowAnyOrigin   = "'*'"
+	trueValue        = "true"
+	prodStage        = "prod"
+)
+
 func patchOps(ops ...PatchOperation) UpdateRequest { return UpdateRequest{PatchOperations: ops} }
 
 // newProxyAPI creates a REST API with a /{proxy+} resource and an OPTIONS
@@ -73,9 +80,11 @@ func (c *apiClient) newProxyAPI(name string) (apiID, resourceID string) {
 	c.t.Helper()
 
 	var api CreateRestAPIResponse
+
 	c.call(http.MethodPost, "/restapis", CreateRestAPIRequest{Name: name, Policy: `{"Version":"2012-10-17"}`}, http.StatusCreated, &api)
 
 	var res ResourceResponse
+
 	c.call(http.MethodPost, "/restapis/"+api.ID+"/resources/"+api.RootResourceID, CreateResourceRequest{PathPart: "{proxy+}"}, http.StatusCreated, &res)
 
 	c.call(http.MethodPut, "/restapis/"+api.ID+"/resources/"+res.ID+"/methods/OPTIONS",
@@ -92,7 +101,7 @@ func TestMethodAndIntegrationResponses(t *testing.T) {
 	methodPath := "/restapis/" + apiID + "/resources/" + resID + "/methods/OPTIONS"
 
 	c.call(http.MethodPut, methodPath+"/responses/200",
-		PutMethodResponseRequest{ResponseParameters: map[string]bool{"method.response.header.Access-Control-Allow-Origin": true}}, http.StatusCreated, nil)
+		PutMethodResponseRequest{ResponseParameters: map[string]bool{allowOriginParam: true}}, http.StatusCreated, nil)
 
 	// An integration response needs an integration.
 	c.call(http.MethodPut, methodPath+"/integration/responses/200", PutIntegrationResponseRequest{}, http.StatusNotFound, nil)
@@ -101,17 +110,18 @@ func TestMethodAndIntegrationResponses(t *testing.T) {
 		PutIntegrationRequest{Type: integrationTypeMock, RequestTemplates: map[string]string{contentTypeJSON: `{"statusCode": 200}`}}, http.StatusCreated, nil)
 
 	c.call(http.MethodPut, methodPath+"/integration/responses/200", PutIntegrationResponseRequest{
-		ResponseParameters: map[string]string{"method.response.header.Access-Control-Allow-Origin": "'*'"},
+		ResponseParameters: map[string]string{allowOriginParam: allowAnyOrigin},
 	}, http.StatusCreated, nil)
 
 	var method MethodOutput
+
 	c.call(http.MethodGet, methodPath, nil, http.StatusOK, &method)
 
-	if !method.MethodResponses["200"].ResponseParameters["method.response.header.Access-Control-Allow-Origin"] {
+	if !method.MethodResponses["200"].ResponseParameters[allowOriginParam] {
 		t.Errorf("methodResponses = %+v", method.MethodResponses)
 	}
 
-	if got := method.MethodIntegration.IntegrationResponses["200"].ResponseParameters["method.response.header.Access-Control-Allow-Origin"]; got != "'*'" {
+	if got := method.MethodIntegration.IntegrationResponses["200"].ResponseParameters[allowOriginParam]; got != allowAnyOrigin {
 		t.Errorf("integrationResponses = %+v", method.MethodIntegration.IntegrationResponses)
 	}
 
@@ -120,6 +130,7 @@ func TestMethodAndIntegrationResponses(t *testing.T) {
 	}
 
 	var ir IntegrationResponse
+
 	c.call(http.MethodPatch, methodPath+"/integration/responses/200", patchOps(
 		PatchOperation{Op: patchReplace, Path: "/selectionPattern", Value: "2\\d{2}"},
 		PatchOperation{Op: patchAdd, Path: "/responseTemplates/application~1json", Value: `{"ok":true}`},
@@ -130,6 +141,7 @@ func TestMethodAndIntegrationResponses(t *testing.T) {
 	}
 
 	var mr MethodResponse
+
 	c.call(http.MethodPatch, methodPath+"/responses/200", patchOps(
 		PatchOperation{Op: patchRemove, Path: "/responseParameters/method.response.header.Access-Control-Allow-Origin"},
 	), http.StatusOK, &mr)
@@ -139,6 +151,18 @@ func TestMethodAndIntegrationResponses(t *testing.T) {
 	}
 
 	c.call(http.MethodPut, methodPath+"/responses/abc", PutMethodResponseRequest{}, http.StatusBadRequest, nil)
+}
+
+func TestMethodAndIntegrationResponses_Delete(t *testing.T) {
+	t.Parallel()
+
+	c := newAPIClient(t)
+	apiID, resID := c.newProxyAPI("responses-delete")
+	methodPath := "/restapis/" + apiID + "/resources/" + resID + "/methods/OPTIONS"
+
+	c.call(http.MethodPut, methodPath+"/responses/200", PutMethodResponseRequest{}, http.StatusCreated, nil)
+	c.call(http.MethodPut, methodPath+"/integration", PutIntegrationRequest{Type: integrationTypeMock}, http.StatusCreated, nil)
+	c.call(http.MethodPut, methodPath+"/integration/responses/200", PutIntegrationResponseRequest{}, http.StatusCreated, nil)
 
 	c.call(http.MethodDelete, methodPath+"/integration/responses/200", nil, http.StatusAccepted, nil)
 	c.call(http.MethodGet, methodPath+"/integration/responses/200", nil, http.StatusNotFound, nil)
@@ -155,6 +179,7 @@ func TestUpdateOperations(t *testing.T) {
 	apiID, resID := c.newProxyAPI("updates")
 
 	var api CreateRestAPIResponse
+
 	c.call(http.MethodPatch, "/restapis/"+apiID, patchOps(
 		PatchOperation{Op: patchReplace, Path: "/name", Value: "renamed"},
 		PatchOperation{Op: patchAdd, Path: "/binaryMediaTypes/image~1png"},
@@ -177,9 +202,10 @@ func TestUpdateOperations(t *testing.T) {
 	methodPath := "/restapis/" + apiID + "/resources/" + resID + "/methods/OPTIONS"
 
 	var method MethodOutput
+
 	c.call(http.MethodPatch, methodPath, patchOps(
-		PatchOperation{Op: patchReplace, Path: "/apiKeyRequired", Value: "true"},
-		PatchOperation{Op: patchAdd, Path: "/requestParameters/method.request.querystring.q", Value: "true"},
+		PatchOperation{Op: patchReplace, Path: "/apiKeyRequired", Value: trueValue},
+		PatchOperation{Op: patchAdd, Path: "/requestParameters/method.request.querystring.q", Value: trueValue},
 	), http.StatusOK, &method)
 
 	if !method.APIKeyRequired || !method.RequestParameters["method.request.querystring.q"] {
@@ -189,6 +215,7 @@ func TestUpdateOperations(t *testing.T) {
 	c.call(http.MethodPut, methodPath+"/integration", PutIntegrationRequest{Type: "HTTP_PROXY", HTTPMethod: "ANY", URI: "http://a.example"}, http.StatusCreated, nil)
 
 	var integration IntegrationOutput
+
 	c.call(http.MethodPatch, methodPath+"/integration", patchOps(
 		PatchOperation{Op: patchReplace, Path: "/uri", Value: "http://b.example"},
 		PatchOperation{Op: patchReplace, Path: "/timeoutInMillis", Value: "5000"},
@@ -198,28 +225,38 @@ func TestUpdateOperations(t *testing.T) {
 	if integration.URI != "http://b.example" || integration.TimeoutInMillis != 5000 || integration.RequestParameters["integration.request.header.X"] != "'v'" {
 		t.Errorf("UpdateIntegration = %+v", integration)
 	}
+}
+
+func TestUpdateStageAndDeployment(t *testing.T) {
+	t.Parallel()
+
+	c := newAPIClient(t)
+	apiID, _ := c.newProxyAPI("stages")
 
 	var deployment DeploymentResponse
+
 	c.call(http.MethodPost, "/restapis/"+apiID+"/deployments", CreateDeploymentRequest{}, http.StatusCreated, &deployment)
-	c.call(http.MethodPost, "/restapis/"+apiID+"/stages", CreateStageRequest{StageName: "prod", DeploymentID: deployment.ID}, http.StatusCreated, nil)
+	c.call(http.MethodPost, "/restapis/"+apiID+"/stages", CreateStageRequest{StageName: prodStage, DeploymentID: deployment.ID}, http.StatusCreated, nil)
 
 	var stage StageResponse
-	c.call(http.MethodPatch, "/restapis/"+apiID+"/stages/prod", patchOps(
-		PatchOperation{Op: patchReplace, Path: "/variables/env", Value: "prod"},
-		PatchOperation{Op: patchReplace, Path: "/tracingEnabled", Value: "true"},
-		PatchOperation{Op: patchReplace, Path: "/*/*/metrics/enabled", Value: "true"},
+
+	c.call(http.MethodPatch, "/restapis/"+apiID+"/stages/"+prodStage, patchOps(
+		PatchOperation{Op: patchReplace, Path: "/variables/env", Value: prodStage},
+		PatchOperation{Op: patchReplace, Path: "/tracingEnabled", Value: trueValue},
+		PatchOperation{Op: patchReplace, Path: "/*/*/metrics/enabled", Value: trueValue},
 		PatchOperation{Op: patchReplace, Path: "/*/*/throttling/rateLimit", Value: "10.5"},
 		PatchOperation{Op: patchReplace, Path: "/accessLogSettings/destinationArn", Value: "arn:aws:logs:us-east-1:000000000000:log-group:g"},
 	), http.StatusOK, &stage)
 
 	ms := stage.MethodSettings["*/*"]
-	if stage.Variables["env"] != "prod" || !stage.TracingEnabled || ms == nil || !ms.MetricsEnabled || ms.ThrottlingRateLimit != 10.5 || stage.AccessLogSettings.DestinationArn == "" {
+	if stage.Variables["env"] != prodStage || !stage.TracingEnabled || ms == nil || !ms.MetricsEnabled || ms.ThrottlingRateLimit != 10.5 || stage.AccessLogSettings.DestinationArn == "" {
 		t.Errorf("UpdateStage = %+v (method settings %+v)", stage, ms)
 	}
 
-	c.call(http.MethodPatch, "/restapis/"+apiID+"/stages/prod", patchOps(PatchOperation{Op: patchReplace, Path: "/deploymentId", Value: "missing"}), http.StatusNotFound, nil)
+	c.call(http.MethodPatch, "/restapis/"+apiID+"/stages/"+prodStage, patchOps(PatchOperation{Op: patchReplace, Path: "/deploymentId", Value: "missing"}), http.StatusNotFound, nil)
 
 	var dep DeploymentResponse
+
 	c.call(http.MethodPatch, "/restapis/"+apiID+"/deployments/"+deployment.ID, patchOps(PatchOperation{Op: patchReplace, Path: "/description", Value: "v2"}), http.StatusOK, &dep)
 
 	if dep.Description != "v2" {
@@ -233,10 +270,12 @@ func TestUpdateResource_RepathsDescendants(t *testing.T) {
 	c := newAPIClient(t)
 
 	var api CreateRestAPIResponse
+
 	c.call(http.MethodPost, "/restapis", CreateRestAPIRequest{Name: "tree"}, http.StatusCreated, &api)
 
 	create := func(parent, part string) ResourceResponse {
 		var res ResourceResponse
+
 		c.call(http.MethodPost, "/restapis/"+api.ID+"/resources/"+parent, CreateResourceRequest{PathPart: part}, http.StatusCreated, &res)
 
 		return res
@@ -247,9 +286,11 @@ func TestUpdateResource_RepathsDescendants(t *testing.T) {
 	child := create(items.ID, "{id}")
 
 	var renamed ResourceResponse
+
 	c.call(http.MethodPatch, "/restapis/"+api.ID+"/resources/"+v1.ID, patchOps(PatchOperation{Op: patchReplace, Path: "/pathPart", Value: "v2"}), http.StatusOK, &renamed)
 
 	var got ResourceResponse
+
 	c.call(http.MethodGet, "/restapis/"+api.ID+"/resources/"+child.ID, nil, http.StatusOK, &got)
 
 	if renamed.Path != "/v2" || got.Path != "/v2/items/{id}" {
@@ -272,7 +313,7 @@ func TestExecuteAPI_MockIntegration(t *testing.T) {
 		PutIntegrationRequest{Type: integrationTypeMock, RequestTemplates: map[string]string{contentTypeJSON: `{"statusCode": 200}`}}, http.StatusCreated, nil)
 	c.call(http.MethodPut, methodPath+"/integration/responses/200", PutIntegrationResponseRequest{
 		ResponseParameters: map[string]string{
-			"method.response.header.Access-Control-Allow-Origin":  "'*'",
+			allowOriginParam: allowAnyOrigin,
 			"method.response.header.Access-Control-Allow-Methods": "'GET,OPTIONS'",
 			"method.response.header.X-From-Integration":           "integration.response.header.X",
 		},
@@ -280,7 +321,8 @@ func TestExecuteAPI_MockIntegration(t *testing.T) {
 	}, http.StatusCreated, nil)
 
 	var deployment DeploymentResponse
-	c.call(http.MethodPost, "/restapis/"+apiID+"/deployments", CreateDeploymentRequest{StageName: "prod"}, http.StatusCreated, &deployment)
+
+	c.call(http.MethodPost, "/restapis/"+apiID+"/deployments", CreateDeploymentRequest{StageName: prodStage}, http.StatusCreated, &deployment)
 
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodOptions, "/prod/anything/here", http.NoBody)
 	w := httptest.NewRecorder()

@@ -10,6 +10,8 @@ import (
 	"testing"
 )
 
+const viewerRequestEvent = "viewer-request"
+
 const functionTestCode = "function handler(event) { return event.request; }"
 
 func createFunctionRequest(name string) *CreateFunctionRequest {
@@ -86,6 +88,23 @@ func TestFunction_Lifecycle(t *testing.T) {
 	if got := published.status(functionStageDevelopment); got != functionStatusUnassociated {
 		t.Errorf("published status = %s", got)
 	}
+}
+
+func TestFunction_UpdateAndDelete(t *testing.T) {
+	t.Parallel()
+
+	store := NewMemoryStorage()
+	ctx := context.Background()
+
+	created, err := store.CreateFunction(ctx, createFunctionRequest("rewrite"))
+	if err != nil {
+		t.Fatalf("CreateFunction: %v", err)
+	}
+
+	published, err := store.PublishFunction(ctx, "rewrite", created.Development.ETag)
+	if err != nil {
+		t.Fatalf("PublishFunction: %v", err)
+	}
 
 	update := &UpdateFunctionRequest{
 		FunctionConfig: &FunctionConfigXML{Comment: "v2", Runtime: "cloudfront-js-1.0"},
@@ -128,7 +147,7 @@ func TestFunction_DistributionAssociation(t *testing.T) {
 	req := distributionRequest("function-assoc", policyRefs{}, nil)
 	req.DefaultCacheBehavior.FunctionAssociations = &FunctionAssociationsXML{
 		Quantity: 1,
-		Items:    []FunctionAssociationXML{{FunctionARN: fn.ARN, EventType: "viewer-request"}},
+		Items:    []FunctionAssociationXML{{FunctionARN: fn.ARN, EventType: viewerRequestEvent}},
 	}
 
 	if _, err := store.CreateDistribution(ctx, req); errorCode(t, err) != errInvalidFunctionAssoc {
@@ -155,14 +174,14 @@ func TestFunction_DistributionAssociation(t *testing.T) {
 
 	// The association must read back, or terraform reports drift.
 	out := buildDistributionConfigXML(dist.DistributionConfig).DefaultCacheBehavior.FunctionAssociations
-	if out.Quantity != 1 || out.Items[0].FunctionARN != fn.ARN || out.Items[0].EventType != "viewer-request" {
+	if out.Quantity != 1 || out.Items[0].FunctionARN != fn.ARN || out.Items[0].EventType != viewerRequestEvent {
 		t.Errorf("FunctionAssociations read back = %+v", out)
 	}
 
 	unknown := distributionRequest("function-unknown", policyRefs{}, nil)
 	unknown.DefaultCacheBehavior.FunctionAssociations = &FunctionAssociationsXML{
 		Quantity: 1,
-		Items:    []FunctionAssociationXML{{FunctionARN: "arn:aws:cloudfront::000000000000:function/missing", EventType: "viewer-request"}},
+		Items:    []FunctionAssociationXML{{FunctionARN: "arn:aws:cloudfront::000000000000:function/missing", EventType: viewerRequestEvent}},
 	}
 
 	if _, err := store.CreateDistribution(ctx, unknown); errorCode(t, err) != errNoSuchFunctionExists {
@@ -203,10 +222,6 @@ func TestFunctionHandlers_StagesAndCode(t *testing.T) {
 		return rec
 	}
 
-	if w := call(http.MethodGet, functionPath+"handlers/describe?Stage=LIVE", svc.DescribeFunction, nil); w.Code != http.StatusNotFound {
-		t.Errorf("describe LIVE before publish: status %d", w.Code)
-	}
-
 	if w := call(http.MethodGet, functionPath+"handlers?Stage=DEVELOPMENT", svc.GetFunction, nil); w.Code != http.StatusOK || w.Body.String() != functionTestCode || w.Header().Get("ETag") != devETag {
 		t.Errorf("GetFunction: status %d etag %q body %q", w.Code, w.Header().Get("ETag"), w.Body.String())
 	}
@@ -223,16 +238,57 @@ func TestFunctionHandlers_StagesAndCode(t *testing.T) {
 		t.Errorf("describe LIVE: status %d etag %q (want %q) body=%s", w.Code, w.Header().Get("ETag"), liveETag, w.Body.String())
 	}
 
-	if w := call(http.MethodGet, "/2020-05-31/function?Stage=LIVE", svc.ListFunctions, nil); !strings.Contains(w.Body.String(), "<Quantity>1</Quantity>") {
-		t.Errorf("ListFunctions(LIVE) = %s", w.Body.String())
-	}
-
-	if w := call(http.MethodGet, "/2020-05-31/function?Stage=bogus", svc.ListFunctions, nil); w.Code != http.StatusBadRequest {
-		t.Errorf("ListFunctions(bogus stage): status %d", w.Code)
-	}
-
 	if w := call(http.MethodDelete, functionPath+"handlers", svc.DeleteFunction, map[string]string{"If-Match": devETag}); w.Code != http.StatusNoContent {
 		t.Errorf("DeleteFunction: status %d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestFunctionHandlers_ListByStage(t *testing.T) {
+	t.Parallel()
+
+	svc := New(NewMemoryStorage())
+
+	unpublished, err := svc.storage.CreateFunction(t.Context(), createFunctionRequest("dev-only"))
+	if err != nil {
+		t.Fatalf("CreateFunction: %v", err)
+	}
+
+	if _, err := svc.storage.CreateFunction(t.Context(), createFunctionRequest("live")); err != nil {
+		t.Fatalf("CreateFunction: %v", err)
+	}
+
+	live, _ := svc.storage.GetFunction(t.Context(), "live")
+	if _, err := svc.storage.PublishFunction(t.Context(), "live", live.Development.ETag); err != nil {
+		t.Fatalf("PublishFunction: %v", err)
+	}
+
+	list := func(stage string) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		svc.ListFunctions(w, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/2020-05-31/function?Stage="+stage, http.NoBody))
+
+		return w
+	}
+
+	if got := list(functionStageLive).Body.String(); !strings.Contains(got, "<Quantity>1</Quantity>") || strings.Contains(got, unpublished.Name) {
+		t.Errorf("ListFunctions(LIVE) = %s", got)
+	}
+
+	if got := list(functionStageDevelopment).Body.String(); !strings.Contains(got, "<Quantity>2</Quantity>") {
+		t.Errorf("ListFunctions(DEVELOPMENT) = %s", got)
+	}
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, functionPath+unpublished.Name+"/describe?Stage=LIVE", http.NoBody)
+	req.SetPathValue("name", unpublished.Name)
+
+	w := httptest.NewRecorder()
+	svc.DescribeFunction(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("describe LIVE before publish: status %d", w.Code)
+	}
+
+	if w := list("bogus"); w.Code != http.StatusBadRequest {
+		t.Errorf("ListFunctions(bogus stage): status %d", w.Code)
 	}
 }
 
@@ -243,7 +299,7 @@ func TestDistribution_CustomErrorResponsesAndRestrictionsRoundTrip(t *testing.T)
 
 	req := distributionRequest("custom-errors", policyRefs{}, nil)
 	req.CustomErrorResponses = &CustomErrorResponsesXML{Quantity: 1, Items: []CustomErrorResponseXML{
-		{ErrorCode: http.StatusNotFound, ResponsePagePath: "/index.html", ResponseCode: "200", ErrorCachingMinTTL: new(int64(10))},
+		{ErrorCode: http.StatusNotFound, ResponsePagePath: spaIndexPath, ResponseCode: "200", ErrorCachingMinTTL: new(int64(10))},
 	}}
 	req.Restrictions = &RestrictionsXML{GeoRestriction: &GeoRestrictionXML{RestrictionType: "whitelist", Quantity: 2, Items: []string{"JP", "US"}}}
 
@@ -254,7 +310,7 @@ func TestDistribution_CustomErrorResponsesAndRestrictionsRoundTrip(t *testing.T)
 
 	out := buildDistributionConfigXML(dist.DistributionConfig)
 
-	if out.CustomErrorResponses.Quantity != 1 || out.CustomErrorResponses.Items[0].ResponsePagePath != "/index.html" || *out.CustomErrorResponses.Items[0].ErrorCachingMinTTL != 10 {
+	if out.CustomErrorResponses.Quantity != 1 || out.CustomErrorResponses.Items[0].ResponsePagePath != spaIndexPath || *out.CustomErrorResponses.Items[0].ErrorCachingMinTTL != 10 {
 		t.Errorf("CustomErrorResponses = %+v", out.CustomErrorResponses)
 	}
 

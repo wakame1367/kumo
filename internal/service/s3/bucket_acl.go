@@ -17,6 +17,8 @@ const (
 	errCodeOwnershipControlsNotFound = "OwnershipControlsNotFoundError"
 	errCodeACLNotSupported           = "AccessControlListNotSupported"
 	cannedACLPrivate                 = "private"
+	cannedACLPublicRead              = "public-read"
+	headerAmzACL                     = "X-Amz-Acl"
 	cannedACLBucketOwnerFullControl  = "bucket-owner-full-control"
 )
 
@@ -47,7 +49,7 @@ func cannedACLGrants(canned string) []ACLGrant {
 	}
 
 	switch canned {
-	case "public-read":
+	case cannedACLPublicRead:
 		return []ACLGrant{group(groupAllUsers, "READ")}
 	case "public-read-write":
 		return []ACLGrant{group(groupAllUsers, "READ"), group(groupAllUsers, "WRITE")}
@@ -74,7 +76,7 @@ func (s *Service) PutBucketACL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	acl, err := decodeObjectACL(body, r.Header.Get("X-Amz-Acl"))
+	acl, err := decodeObjectACL(body, r.Header.Get(headerAmzACL))
 	if err != nil {
 		writeS3Error(w, r, "MalformedACLError", err.Error(), http.StatusBadRequest)
 

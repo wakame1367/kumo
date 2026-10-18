@@ -61,11 +61,11 @@ func TestBucketOwnershipControls(t *testing.T) {
 	}
 
 	// ACLs are disabled: only owner-only ACLs are accepted.
-	if w := do(http.MethodPut, "/owned?acl", "", map[string]string{"X-Amz-Acl": "public-read"}); w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), errCodeACLNotSupported) {
+	if w := do(http.MethodPut, "/owned?acl", "", map[string]string{headerAmzACL: cannedACLPublicRead}); w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), errCodeACLNotSupported) {
 		t.Errorf("public-read with ACLs disabled: %d %s", w.Code, w.Body.String())
 	}
 
-	if w := do(http.MethodPut, "/owned?acl", "", map[string]string{"X-Amz-Acl": "private"}); w.Code != http.StatusOK {
+	if w := do(http.MethodPut, "/owned?acl", "", map[string]string{headerAmzACL: cannedACLPrivate}); w.Code != http.StatusOK {
 		t.Errorf("private with ACLs disabled: %d %s", w.Code, w.Body.String())
 	}
 
@@ -97,7 +97,7 @@ func TestBucketACL_CannedRoundTrip(t *testing.T) {
 		t.Errorf("default ACL: %d %s", w.Code, w.Body.String())
 	}
 
-	if w := do(http.MethodPut, "/acl-bucket?acl", "", map[string]string{"X-Amz-Acl": "public-read"}); w.Code != http.StatusOK {
+	if w := do(http.MethodPut, "/acl-bucket?acl", "", map[string]string{headerAmzACL: cannedACLPublicRead}); w.Code != http.StatusOK {
 		t.Fatalf("PutBucketAcl: %d %s", w.Code, w.Body.String())
 	}
 

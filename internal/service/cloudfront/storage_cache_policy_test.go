@@ -239,6 +239,17 @@ func TestCachePolicy_ListFilterAndPagination(t *testing.T) {
 	if err != nil || len(second) != 1 || next != "" || second[0].ID <= first[1].ID {
 		t.Fatalf("second page = %d items, next %q, err %v", len(second), next, err)
 	}
+}
+
+func TestCachePolicy_ListIncludesManaged(t *testing.T) {
+	t.Parallel()
+
+	store := NewMemoryStorage()
+	ctx := context.Background()
+
+	if _, err := store.CreateCachePolicy(ctx, validCachePolicy("custom")); err != nil {
+		t.Fatalf("CreateCachePolicy: %v", err)
+	}
 
 	managed, next, err := store.ListCachePolicies(ctx, cachePolicyTypeManaged, "", 0)
 	if err != nil || len(managed) != len(managedCachePolicySpecs) || next != "" {
@@ -252,7 +263,7 @@ func TestCachePolicy_ListFilterAndPagination(t *testing.T) {
 	}
 
 	all, _, err := store.ListCachePolicies(ctx, "", "", 0)
-	if err != nil || len(all) != len(managedCachePolicySpecs)+3 {
+	if err != nil || len(all) != len(managedCachePolicySpecs)+1 {
 		t.Fatalf("unfiltered = %d items, err %v; want managed and custom", len(all), err)
 	}
 }

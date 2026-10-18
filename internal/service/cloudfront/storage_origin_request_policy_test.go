@@ -33,7 +33,7 @@ func TestValidateOriginRequestPolicyConfig(t *testing.T) {
 		cfg  *OriginRequestPolicyConfig
 		want string
 	}{
-		"empty name":        {mutate(func(c *OriginRequestPolicyConfig) { c.Name = "" }), errInvalidArgument},
+		"missing name":      {mutate(func(c *OriginRequestPolicyConfig) { c.Name = "" }), errInvalidArgument},
 		"missing headers":   {mutate(func(c *OriginRequestPolicyConfig) { c.HeadersConfig = nil }), errInvalidArgument},
 		"missing cookies":   {mutate(func(c *OriginRequestPolicyConfig) { c.CookiesConfig = nil }), errInvalidArgument},
 		"missing query":     {mutate(func(c *OriginRequestPolicyConfig) { c.QueryStringsConfig = nil }), errInvalidArgument},

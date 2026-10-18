@@ -29,6 +29,7 @@ func newLambdaClient(t *testing.T) *lambdaClient {
 	t.Helper()
 
 	svc := New(NewMemoryStorage(defaultBaseURL), defaultBaseURL)
+
 	t.Cleanup(func() { _ = svc.Close() })
 
 	mux := http.NewServeMux()
@@ -61,7 +62,10 @@ func (c *lambdaClient) call(method, path string, body any, want int, out any) {
 	}
 }
 
-const fnPath = "/2015-03-31/functions/"
+const (
+	fnPath   = "/2015-03-31/functions/"
+	testRole = "arn:aws:iam::000000000000:role/r"
+)
 
 func TestVersions_PublishAndList(t *testing.T) {
 	t.Parallel()
@@ -69,8 +73,9 @@ func TestVersions_PublishAndList(t *testing.T) {
 	c := newLambdaClient(t)
 
 	var created CreateFunctionResponse
+
 	c.call(http.MethodPost, "/2015-03-31/functions", CreateFunctionRequest{
-		FunctionName: "versioned", Role: "arn:aws:iam::000000000000:role/r", Runtime: "nodejs20.x", Handler: "index.handler",
+		FunctionName: "versioned", Role: testRole, Runtime: "nodejs20.x", Handler: "index.handler",
 		Code: FunctionCode{ZipFile: []byte("v1")}, Publish: true,
 	}, http.StatusCreated, &created)
 
@@ -80,6 +85,7 @@ func TestVersions_PublishAndList(t *testing.T) {
 
 	// Publishing unchanged code returns the existing version.
 	var same FunctionConfiguration
+
 	c.call(http.MethodPost, fnPath+"versioned/versions", publishVersionRequest{}, http.StatusCreated, &same)
 
 	if same.Version != "1" {
@@ -89,6 +95,7 @@ func TestVersions_PublishAndList(t *testing.T) {
 	c.call(http.MethodPost, fnPath+"versioned/versions", publishVersionRequest{CodeSha256: "stale"}, http.StatusPreconditionFailed, nil)
 
 	var updated CreateFunctionResponse
+
 	c.call(http.MethodPut, fnPath+"versioned/code", UpdateFunctionCodeRequest{ZipFile: []byte("v2"), Publish: true}, http.StatusOK, &updated)
 
 	if updated.Version != "2" {
@@ -96,6 +103,7 @@ func TestVersions_PublishAndList(t *testing.T) {
 	}
 
 	var list listVersionsByFunctionResponse
+
 	c.call(http.MethodGet, fnPath+"versioned/versions", nil, http.StatusOK, &list)
 
 	if len(list.Versions) != 3 || list.Versions[0].Version != latestVersion || list.Versions[2].Version != "2" ||
@@ -104,6 +112,7 @@ func TestVersions_PublishAndList(t *testing.T) {
 	}
 
 	var v1 FunctionConfiguration
+
 	c.call(http.MethodGet, fnPath+"versioned/configuration?Qualifier=1", nil, http.StatusOK, &v1)
 
 	if v1.Version != "1" || v1.CodeSha256 != list.Versions[1].CodeSha256 {
@@ -111,11 +120,22 @@ func TestVersions_PublishAndList(t *testing.T) {
 	}
 
 	c.call(http.MethodGet, fnPath+"versioned/configuration?Qualifier=9", nil, http.StatusNotFound, nil)
+}
+
+func TestVersions_DeleteVersionKeepsFunction(t *testing.T) {
+	t.Parallel()
+
+	c := newLambdaClient(t)
+
+	c.call(http.MethodPost, "/2015-03-31/functions", CreateFunctionRequest{
+		FunctionName: "versioned", Role: testRole, Code: FunctionCode{ZipFile: []byte("v1")}, Publish: true,
+	}, http.StatusCreated, nil)
 
 	c.call(http.MethodDelete, fnPath+"versioned?Qualifier=1", nil, http.StatusNoContent, nil)
 	c.call(http.MethodGet, fnPath+"versioned/configuration?Qualifier=1", nil, http.StatusNotFound, nil)
 
 	var latest FunctionConfiguration
+
 	c.call(http.MethodGet, fnPath+"versioned/configuration", nil, http.StatusOK, &latest)
 
 	if latest.Version != latestVersion {
@@ -129,13 +149,14 @@ func TestAliases_Lifecycle(t *testing.T) {
 	c := newLambdaClient(t)
 
 	c.call(http.MethodPost, "/2015-03-31/functions", CreateFunctionRequest{
-		FunctionName: "aliased", Role: "arn:aws:iam::000000000000:role/r", Code: FunctionCode{ZipFile: []byte("v1")}, Publish: true,
+		FunctionName: "aliased", Role: testRole, Code: FunctionCode{ZipFile: []byte("v1")}, Publish: true,
 	}, http.StatusCreated, nil)
 
 	version := "1"
 	description := "live traffic"
 
 	var alias aliasConfiguration
+
 	c.call(http.MethodPost, fnPath+"aliased/aliases", aliasRequest{Name: "live", FunctionVersion: &version, Description: &description}, http.StatusCreated, &alias)
 
 	if alias.FunctionVersion != "1" || alias.AliasArn == "" || alias.RevisionID == "" {
@@ -164,6 +185,7 @@ func TestAliases_Lifecycle(t *testing.T) {
 	c.call(http.MethodPut, fnPath+"aliased/aliases/live", aliasRequest{FunctionVersion: &latest, RevisionID: "stale"}, http.StatusPreconditionFailed, nil)
 
 	var updated aliasConfiguration
+
 	c.call(http.MethodPut, fnPath+"aliased/aliases/live", aliasRequest{FunctionVersion: &latest, RevisionID: alias.RevisionID}, http.StatusOK, &updated)
 
 	if updated.FunctionVersion != latestVersion || updated.Description != description || updated.RevisionID == alias.RevisionID {
@@ -171,9 +193,11 @@ func TestAliases_Lifecycle(t *testing.T) {
 	}
 
 	var got aliasConfiguration
+
 	c.call(http.MethodGet, fnPath+"aliased/aliases/live", nil, http.StatusOK, &got)
 
 	var list listAliasesResponse
+
 	c.call(http.MethodGet, fnPath+"aliased/aliases", nil, http.StatusOK, &list)
 
 	if got.FunctionVersion != latestVersion || len(list.Aliases) != 1 {

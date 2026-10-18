@@ -27,6 +27,7 @@ const (
 	msgInvalidMethodID     = "Invalid method identifier specified"
 	msgInvalidDeploymentID = "Invalid deployment identifier specified"
 	msgInvalidAuthorizerID = "Invalid authorizer identifier specified"
+	msgInvalidStageID      = "Invalid stage identifier specified"
 )
 
 // Storage defines the API Gateway storage interface.
@@ -700,7 +701,7 @@ func (s *MemoryStorage) GetStage(_ context.Context, restAPIID, stageName string)
 
 	stage, exists := data.Stages[stageName]
 	if !exists {
-		return nil, &ServiceError{Code: errStageNotFound, Message: "Invalid stage identifier specified"}
+		return nil, &ServiceError{Code: errStageNotFound, Message: msgInvalidStageID}
 	}
 
 	return stage.clone(), nil
@@ -736,7 +737,7 @@ func (s *MemoryStorage) DeleteStage(_ context.Context, restAPIID, stageName stri
 	}
 
 	if _, exists := data.Stages[stageName]; !exists {
-		return &ServiceError{Code: errStageNotFound, Message: "Invalid stage identifier specified"}
+		return &ServiceError{Code: errStageNotFound, Message: msgInvalidStageID}
 	}
 
 	delete(data.Stages, stageName)

@@ -36,22 +36,22 @@ var managedOriginRequestPolicySpecs = []managedOriginRequestPolicySpec{
 	},
 	{
 		id: "b689b0a8-53d0-40ab-baf2-68738e2966ac", comment: "Policy to forward all parameters in viewer requests except for the Host header",
-		headerBehavior: cachePolicyBehaviorAllExcept, headers: []string{"host"},
+		headerBehavior: cachePolicyBehaviorAllExcept, headers: []string{viewerHeaderHost},
 		cookieBehavior: cachePolicyBehaviorAll, queryBehavior: cachePolicyBehaviorAll,
 	},
 	{
 		id: "59781a5b-3903-41f3-afcb-af62929ccde1", comment: "Policy for Custom Origin with CORS",
-		headerBehavior: cachePolicyBehaviorWhitelist, headers: []string{"origin"},
+		headerBehavior: cachePolicyBehaviorWhitelist, headers: []string{viewerHeaderOrigin},
 		cookieBehavior: cachePolicyBehaviorNone, queryBehavior: cachePolicyBehaviorNone,
 	},
 	{
 		id: "88a5eaf4-2fd4-4709-b370-b4c650ea3fcf", comment: "Policy for S3 origin with CORS",
-		headerBehavior: cachePolicyBehaviorWhitelist, headers: []string{"origin", "access-control-request-headers", "access-control-request-method"},
+		headerBehavior: cachePolicyBehaviorWhitelist, headers: []string{viewerHeaderOrigin, "access-control-request-headers", "access-control-request-method"},
 		cookieBehavior: cachePolicyBehaviorNone, queryBehavior: cachePolicyBehaviorNone,
 	},
 	{
 		id: "775133bc-15f2-49f9-abea-afb2e0bf67d2", comment: "Policy for Elemental MediaTailor Personalized Manifests",
-		headerBehavior: cachePolicyBehaviorWhitelist, headers: []string{"origin", "access-control-request-headers", "x-forwarded-for", "access-control-request-method", "user-agent"},
+		headerBehavior: cachePolicyBehaviorWhitelist, headers: []string{viewerHeaderOrigin, "access-control-request-headers", "x-forwarded-for", "access-control-request-method", "user-agent"},
 		cookieBehavior: cachePolicyBehaviorNone, queryBehavior: cachePolicyBehaviorAll,
 	},
 	{

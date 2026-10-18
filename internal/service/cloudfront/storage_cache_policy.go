@@ -152,7 +152,7 @@ func (s *MemoryStorage) cachePolicyLocked(id string) (*CachePolicy, error) {
 // cachePolicyForWriteLocked applies the If-Match protocol: the header is
 // mandatory (InvalidIfMatchVersion) and must carry the current ETag
 // (PreconditionFailed).
-func (s *MemoryStorage) cachePolicyForWriteLocked(id, ifMatch string, illegal string) (*CachePolicy, error) {
+func (s *MemoryStorage) cachePolicyForWriteLocked(id, ifMatch, illegal string) (*CachePolicy, error) {
 	if _, managed := managedCachePolicies[id]; managed {
 		return nil, &Error{Code: illegal, Message: "AWS-managed cache policies cannot be modified or deleted."}
 	}

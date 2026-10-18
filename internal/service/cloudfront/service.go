@@ -76,6 +76,21 @@ func (s *Service) RegisterRoutes(r service.Router) {
 	r.Handle("PUT", "/2020-05-31/origin-access-control/{id}/config", s.UpdateOriginAccessControl)
 	r.Handle("DELETE", "/2020-05-31/origin-access-control/{id}", s.DeleteOriginAccessControl)
 
+	s.registerPolicyRoutes(r)
+	s.registerFunctionRoutes(r)
+
+	// Edge — proxies real requests through the cache layer. The router cleans
+	// the trailing slash off /kumo/cdn/{id}/, so the distribution root is
+	// registered on its own.
+	for _, method := range []string{"GET", "HEAD", "PUT", "POST", "DELETE", "PATCH", "OPTIONS"} {
+		r.Handle(method, "/kumo/cdn/{distributionId}", s.Edge)
+		r.Handle(method, "/kumo/cdn/{distributionId}/{path...}", s.Edge)
+	}
+}
+
+// registerPolicyRoutes registers the cache, response headers and origin
+// request policy routes.
+func (s *Service) registerPolicyRoutes(r service.Router) {
 	// Cache policy — custom cache key and TTL settings referenced by cache behaviors.
 	r.Handle("POST", "/2020-05-31/cache-policy", s.CreateCachePolicy)
 	r.Handle("GET", "/2020-05-31/cache-policy", s.ListCachePolicies)
@@ -99,8 +114,11 @@ func (s *Service) RegisterRoutes(r service.Router) {
 	r.Handle("GET", "/2020-05-31/origin-request-policy/{id}/config", s.GetOriginRequestPolicyConfig)
 	r.Handle("PUT", "/2020-05-31/origin-request-policy/{id}", s.UpdateOriginRequestPolicy)
 	r.Handle("DELETE", "/2020-05-31/origin-request-policy/{id}", s.DeleteOriginRequestPolicy)
+}
 
-	// CloudFront Functions — viewer request/response code associated with cache behaviors.
+// registerFunctionRoutes registers the CloudFront Functions routes: viewer
+// request/response code associated with cache behaviors.
+func (s *Service) registerFunctionRoutes(r service.Router) {
 	r.Handle("POST", "/2020-05-31/function", s.CreateFunction)
 	r.Handle("GET", "/2020-05-31/function", s.ListFunctions)
 	r.Handle("GET", "/2020-05-31/function/{name}", s.GetFunction)
@@ -108,14 +126,6 @@ func (s *Service) RegisterRoutes(r service.Router) {
 	r.Handle("PUT", "/2020-05-31/function/{name}", s.UpdateFunction)
 	r.Handle("POST", "/2020-05-31/function/{name}/publish", s.PublishFunction)
 	r.Handle("DELETE", "/2020-05-31/function/{name}", s.DeleteFunction)
-
-	// Edge — proxies real requests through the cache layer. The router cleans
-	// the trailing slash off /kumo/cdn/{id}/, so the distribution root is
-	// registered on its own.
-	for _, method := range []string{"GET", "HEAD", "PUT", "POST", "DELETE", "PATCH", "OPTIONS"} {
-		r.Handle(method, "/kumo/cdn/{distributionId}", s.Edge)
-		r.Handle(method, "/kumo/cdn/{distributionId}/{path...}", s.Edge)
-	}
 }
 
 // Close saves the storage state if persistence is enabled.

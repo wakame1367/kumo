@@ -100,7 +100,7 @@ func (s *Service) fetchErrorPage(r *http.Request, dist *Distribution, pagePath s
 	req := r.Clone(r.Context())
 	req.Method = http.MethodGet
 
-	for _, h := range []string{"Range", "If-None-Match", "If-Modified-Since", "If-Match", "If-Unmodified-Since", "Content-Length", "Content-Type"} {
+	for _, h := range []string{"Range", "If-None-Match", "If-Modified-Since", "If-Match", "If-Unmodified-Since", headerContentLength, "Content-Type"} {
 		req.Header.Del(h)
 	}
 

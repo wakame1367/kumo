@@ -2,6 +2,14 @@ package cloudfront
 
 import "time"
 
+// Header names used by the AWS-managed policy definitions and the edge.
+const (
+	viewerHeaderOrigin  = "origin"
+	viewerHeaderHost    = "host"
+	headerHost          = "Host"
+	headerContentLength = "Content-Length"
+)
+
 // AWS-managed policies exist in every account without being created, so a
 // distribution may reference them although kumo never stores them. Only the
 // IDs AWS documents are listed; the name is kept for readers.
@@ -77,29 +85,33 @@ var managedCachePolicySpecs = []managedCachePolicySpec{
 	{
 		id: "08627262-05a9-4f76-9ded-b50ca2e3a84f", comment: "Policy for Elemental MediaPackage Origin",
 		defTTL: 86400, maxTTL: 31536000, gzip: true,
-		headers:        []string{"origin"},
+		headers:        []string{viewerHeaderOrigin},
 		cookieBehavior: cachePolicyBehaviorNone, queryBehavior: cachePolicyBehaviorWhitelist,
 		queryStrings: []string{"aws.manifestfilter", "start", "end", "m"},
 	},
 	{
 		id: "2e54312d-136d-493c-8eb9-b001f22f67d2", comment: "Policy for Amplify Origin",
 		minTTL: 2, defTTL: 2, maxTTL: 31536000, gzip: true, brotli: true,
-		headers:        []string{"Authorization", "CloudFront-Viewer-Country", "Host"},
+		headers:        []string{"Authorization", "CloudFront-Viewer-Country", headerHost},
 		cookieBehavior: cachePolicyBehaviorAll, queryBehavior: cachePolicyBehaviorAll,
 	},
 	{
 		id: "83da9c7e-98b4-4e11-a168-04f0df8e2c65", comment: "Policy for origins that return Cache-Control headers. Query strings are not included in the cache key.",
 		maxTTL: 31536000, gzip: true, brotli: true,
-		headers:        []string{"host", "origin", "x-http-method-override", "x-http-method", "x-method-override"},
+		headers:        useOriginCacheControlHeaders,
 		cookieBehavior: cachePolicyBehaviorAll, queryBehavior: cachePolicyBehaviorNone,
 	},
 	{
 		id: "4cc15a8a-d715-48a4-82b8-cc0b614638fe", comment: "Policy for origins that return Cache-Control headers and serve different content based on query strings.",
 		maxTTL: 31536000, gzip: true, brotli: true,
-		headers:        []string{"host", "origin", "x-http-method-override", "x-http-method", "x-method-override"},
+		headers:        useOriginCacheControlHeaders,
 		cookieBehavior: cachePolicyBehaviorAll, queryBehavior: cachePolicyBehaviorAll,
 	},
 }
+
+// useOriginCacheControlHeaders is the cache key header list of the
+// UseOriginCacheControlHeaders policies.
+var useOriginCacheControlHeaders = []string{viewerHeaderHost, viewerHeaderOrigin, "x-http-method-override", "x-http-method", "x-method-override"}
 
 // managedCachePolicy returns the readable AWS-managed cache policy with the
 // given id.

@@ -370,3 +370,48 @@ type listTagsResponse struct {
 type tagResourceRequest struct {
 	Tags map[string]string `json:"Tags"`
 }
+
+// AliasRoutingConfig shifts a share of an alias's traffic to another version.
+// kumo stores it; invocations always run the function's handler.
+type AliasRoutingConfig struct {
+	AdditionalVersionWeights map[string]float64 `json:"AdditionalVersionWeights,omitempty"`
+}
+
+// publishVersionRequest is the body of PublishVersion.
+type publishVersionRequest struct {
+	CodeSha256  string `json:"CodeSha256,omitempty"`
+	Description string `json:"Description,omitempty"`
+	RevisionID  string `json:"RevisionId,omitempty"`
+}
+
+// aliasRequest is the body of CreateAlias and UpdateAlias; absent fields keep
+// their value on update.
+type aliasRequest struct {
+	Name            string              `json:"Name,omitempty"`
+	FunctionVersion *string             `json:"FunctionVersion,omitempty"`
+	Description     *string             `json:"Description,omitempty"`
+	RoutingConfig   *AliasRoutingConfig `json:"RoutingConfig,omitempty"`
+	RevisionID      string              `json:"RevisionId,omitempty"`
+}
+
+// aliasConfiguration is the wire shape of an alias.
+type aliasConfiguration struct {
+	AliasArn        string              `json:"AliasArn"`
+	Name            string              `json:"Name"`
+	FunctionVersion string              `json:"FunctionVersion"`
+	Description     string              `json:"Description,omitempty"`
+	RoutingConfig   *AliasRoutingConfig `json:"RoutingConfig,omitempty"`
+	RevisionID      string              `json:"RevisionId"`
+}
+
+// listAliasesResponse is the wire shape of ListAliases.
+type listAliasesResponse struct {
+	Aliases    []aliasConfiguration `json:"Aliases"`
+	NextMarker string               `json:"NextMarker,omitempty"`
+}
+
+// listVersionsByFunctionResponse is the wire shape of ListVersionsByFunction.
+type listVersionsByFunctionResponse struct {
+	Versions   []*FunctionConfiguration `json:"Versions"`
+	NextMarker string                   `json:"NextMarker,omitempty"`
+}

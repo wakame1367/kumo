@@ -523,7 +523,8 @@ func escapePolicy(policy string) string {
 func toResourceResponse(res *Resource) *ResourceResponse {
 	methods := make(map[string]MethodOutput)
 
-	for k, m := range res.ResourceMethods {
+	for k := range res.ResourceMethods {
+		m := res.ResourceMethods[k]
 		methods[k] = *toMethodOutput(&m)
 	}
 

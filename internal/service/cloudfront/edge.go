@@ -271,14 +271,10 @@ func sameVarySignature(a, b *cacheEntry) bool {
 func (s *Service) Edge(w http.ResponseWriter, r *http.Request) {
 	distID := r.PathValue("distributionId")
 
-	dist, err := s.storage.GetDistribution(r.Context(), distID)
-	if err != nil {
-		http.Error(w, "no such distribution: "+distID, http.StatusNotFound)
-
+	dist, ok := s.edgeDistribution(w, r, distID)
+	if !ok {
 		return
 	}
-
-	applyDefaultRootObject(r, dist)
 
 	// The matched cache behaviour drives signed-URL enforcement, the origin
 	// and the TTLs below. The cache key stays path-based: the path alone
@@ -335,6 +331,22 @@ func (s *Service) Edge(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeUpstream(w, upstream, "Miss from kumo", 0)
+}
+
+// edgeDistribution loads the distribution a request addresses and serves
+// its DefaultRootObject for the distribution root. On failure the error
+// response has been written.
+func (s *Service) edgeDistribution(w http.ResponseWriter, r *http.Request, distID string) (*Distribution, bool) {
+	dist, err := s.storage.GetDistribution(r.Context(), distID)
+	if err != nil {
+		http.Error(w, "no such distribution: "+distID, http.StatusNotFound)
+
+		return nil, false
+	}
+
+	applyDefaultRootObject(r, dist)
+
+	return dist, true
 }
 
 // tryServeFromCache looks up the cache and either serves the entry,
@@ -536,7 +548,7 @@ func writeNotModified(w http.ResponseWriter, entry *cacheEntry, age time.Duratio
 func writePartialContent(w http.ResponseWriter, entry *cacheEntry, start, end int64, age time.Duration) {
 	for k, vs := range entry.Header {
 		// Skip Content-Length — recomputed below from the slice.
-		if http.CanonicalHeaderKey(k) == "Content-Length" {
+		if http.CanonicalHeaderKey(k) == headerContentLength {
 			continue
 		}
 
@@ -548,7 +560,7 @@ func writePartialContent(w http.ResponseWriter, entry *cacheEntry, start, end in
 	length := end - start + 1
 
 	w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(entry.Body)))
-	w.Header().Set("Content-Length", strconv.FormatInt(length, 10))
+	w.Header().Set(headerContentLength, strconv.FormatInt(length, 10))
 	w.Header().Set("X-Cache", "Hit from kumo")
 
 	if age > 0 {
@@ -591,7 +603,7 @@ func isHopByHopHeader(name string) bool {
 		"Trailers",
 		"Transfer-Encoding",
 		"Upgrade",
-		"Host":
+		headerHost:
 		return true
 	}
 
