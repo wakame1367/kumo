@@ -126,7 +126,7 @@ func (s *Service) ListCachePolicies(w http.ResponseWriter, r *http.Request) {
 		list.Items = &CachePolicySummaryList{}
 
 		for _, policy := range items {
-			list.Items.CachePolicySummary = append(list.Items.CachePolicySummary, CachePolicySummaryXML{Type: cachePolicyTypeCustom, CachePolicy: buildCachePolicyXML(policy, "")})
+			list.Items.CachePolicySummary = append(list.Items.CachePolicySummary, CachePolicySummaryXML{Type: policy.summaryType(), CachePolicy: buildCachePolicyXML(policy, "")})
 		}
 	}
 

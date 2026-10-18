@@ -235,14 +235,25 @@ func TestCachePolicy_ListFilterAndPagination(t *testing.T) {
 		t.Fatalf("first page = %d items, next %q, err %v", len(first), next, err)
 	}
 
-	second, next, err := store.ListCachePolicies(ctx, "", next, 2)
+	second, next, err := store.ListCachePolicies(ctx, cachePolicyTypeCustom, next, 2)
 	if err != nil || len(second) != 1 || next != "" || second[0].ID <= first[1].ID {
 		t.Fatalf("second page = %d items, next %q, err %v", len(second), next, err)
 	}
 
 	managed, next, err := store.ListCachePolicies(ctx, cachePolicyTypeManaged, "", 0)
-	if err != nil || len(managed) != 0 || next != "" {
+	if err != nil || len(managed) != len(managedCachePolicySpecs) || next != "" {
 		t.Fatalf("managed = %d items, next %q, err %v", len(managed), next, err)
+	}
+
+	for _, p := range managed {
+		if p.summaryType() != cachePolicyTypeManaged {
+			t.Errorf("managed listing returned %s policy %s", p.summaryType(), p.ID)
+		}
+	}
+
+	all, _, err := store.ListCachePolicies(ctx, "", "", 0)
+	if err != nil || len(all) != len(managedCachePolicySpecs)+3 {
+		t.Fatalf("unfiltered = %d items, err %v; want managed and custom", len(all), err)
 	}
 }
 
@@ -268,7 +279,7 @@ func TestCachePolicy_SnapshotCompatibility(t *testing.T) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 
-	list, _, _ := restored.ListCachePolicies(context.Background(), "", "", 0)
+	list, _, _ := restored.ListCachePolicies(context.Background(), cachePolicyTypeCustom, "", 0)
 	if len(list) != 1 || list[0].Config.Name != "after-load" || list[0].Config.Parameters.HeadersConfig.Headers.Items.Name[0] != cachePolicyTestHeader {
 		t.Fatalf("restored policies = %+v", list)
 	}
@@ -408,7 +419,7 @@ func TestListCachePolicies_EmptyOmitsItems(t *testing.T) {
 	svc := New(NewMemoryStorage())
 
 	w := httptest.NewRecorder()
-	svc.ListCachePolicies(w, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/2020-05-31/cache-policy", http.NoBody))
+	svc.ListCachePolicies(w, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/2020-05-31/cache-policy?Type=custom", http.NoBody))
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("ListCachePolicies: status %d body=%s", w.Code, w.Body.String())
@@ -423,7 +434,7 @@ func TestListCachePolicies_EmptyOmitsItems(t *testing.T) {
 	}
 
 	w = httptest.NewRecorder()
-	svc.ListCachePolicies(w, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/2020-05-31/cache-policy", http.NoBody))
+	svc.ListCachePolicies(w, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/2020-05-31/cache-policy?Type=custom", http.NoBody))
 
 	if got := w.Body.String(); !strings.Contains(got, "<Quantity>1</Quantity><Items><CachePolicySummary><Type>custom</Type>") {
 		t.Errorf("list body = %s", got)

@@ -49,6 +49,10 @@ func (s *MemoryStorage) GetCachePolicy(_ context.Context, id string) (*CachePoli
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	if managed, ok := managedCachePolicy(id); ok {
+		return managed, nil
+	}
+
 	policy, err := s.cachePolicyLocked(id)
 	if err != nil {
 		return nil, err
@@ -57,10 +61,9 @@ func (s *MemoryStorage) GetCachePolicy(_ context.Context, id string) (*CachePoli
 	return policy.clone(), nil
 }
 
-// ListCachePolicies returns the custom cache policies sorted by id, starting
-// after marker and limited to maxItems; nextMarker is the last id returned
-// when more remain. kumo has no AWS-managed policies, so the managed filter
-// yields nothing.
+// ListCachePolicies returns the cache policies of the requested type (both
+// when policyType is empty) sorted by id, starting after marker and limited
+// to maxItems; nextMarker is the last id returned when more remain.
 func (s *MemoryStorage) ListCachePolicies(_ context.Context, policyType, marker string, maxItems int) ([]*CachePolicy, string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -69,14 +72,16 @@ func (s *MemoryStorage) ListCachePolicies(_ context.Context, policyType, marker 
 		maxItems = cachePolicyListMaxItems
 	}
 
-	if policyType == cachePolicyTypeManaged {
-		return nil, "", nil
+	all := make([]*CachePolicy, 0, len(s.CachePolicies)+len(managedCachePolicySpecs))
+
+	if policyType != cachePolicyTypeCustom {
+		all = append(all, listManagedCachePolicies()...)
 	}
 
-	all := make([]*CachePolicy, 0, len(s.CachePolicies))
-
-	for _, policy := range s.CachePolicies {
-		all = append(all, policy.clone())
+	if policyType != cachePolicyTypeManaged {
+		for _, policy := range s.CachePolicies {
+			all = append(all, policy.clone())
+		}
 	}
 
 	page, nextMarker := pageByID(all, func(p *CachePolicy) string { return p.ID }, marker, maxItems)
@@ -90,7 +95,7 @@ func (s *MemoryStorage) UpdateCachePolicy(_ context.Context, id string, cfg *Cac
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	policy, err := s.cachePolicyForWriteLocked(id, ifMatch)
+	policy, err := s.cachePolicyForWriteLocked(id, ifMatch, errIllegalUpdate)
 	if err != nil {
 		return nil, err
 	}
@@ -120,7 +125,7 @@ func (s *MemoryStorage) DeleteCachePolicy(_ context.Context, id, ifMatch string)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if _, err := s.cachePolicyForWriteLocked(id, ifMatch); err != nil {
+	if _, err := s.cachePolicyForWriteLocked(id, ifMatch, errIllegalDelete); err != nil {
 		return err
 	}
 
@@ -147,7 +152,11 @@ func (s *MemoryStorage) cachePolicyLocked(id string) (*CachePolicy, error) {
 // cachePolicyForWriteLocked applies the If-Match protocol: the header is
 // mandatory (InvalidIfMatchVersion) and must carry the current ETag
 // (PreconditionFailed).
-func (s *MemoryStorage) cachePolicyForWriteLocked(id, ifMatch string) (*CachePolicy, error) {
+func (s *MemoryStorage) cachePolicyForWriteLocked(id, ifMatch string, illegal string) (*CachePolicy, error) {
+	if _, managed := managedCachePolicies[id]; managed {
+		return nil, &Error{Code: illegal, Message: "AWS-managed cache policies cannot be modified or deleted."}
+	}
+
 	if err := requireIfMatch(ifMatch); err != nil {
 		return nil, err
 	}

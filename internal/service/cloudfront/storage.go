@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 
@@ -70,6 +71,21 @@ type Storage interface {
 	ListResponseHeadersPolicies(ctx context.Context, policyType, marker string, maxItems int) ([]*ResponseHeadersPolicy, string, error)
 	UpdateResponseHeadersPolicy(ctx context.Context, id string, cfg *ResponseHeadersPolicyConfig, ifMatch string) (*ResponseHeadersPolicy, error)
 	DeleteResponseHeadersPolicy(ctx context.Context, id, ifMatch string) error
+
+	// Origin request policy.
+	CreateOriginRequestPolicy(ctx context.Context, cfg *OriginRequestPolicyConfig) (*OriginRequestPolicy, error)
+	GetOriginRequestPolicy(ctx context.Context, id string) (*OriginRequestPolicy, error)
+	ListOriginRequestPolicies(ctx context.Context, policyType, marker string, maxItems int) ([]*OriginRequestPolicy, string, error)
+	UpdateOriginRequestPolicy(ctx context.Context, id string, cfg *OriginRequestPolicyConfig, ifMatch string) (*OriginRequestPolicy, error)
+	DeleteOriginRequestPolicy(ctx context.Context, id, ifMatch string) error
+
+	// CloudFront Functions.
+	CreateFunction(ctx context.Context, req *CreateFunctionRequest) (*Function, error)
+	GetFunction(ctx context.Context, name string) (*Function, error)
+	ListFunctions(ctx context.Context, stage, marker string, maxItems int) ([]*Function, string, error)
+	UpdateFunction(ctx context.Context, name string, req *UpdateFunctionRequest, ifMatch string) (*Function, error)
+	PublishFunction(ctx context.Context, name, ifMatch string) (*Function, error)
+	DeleteFunction(ctx context.Context, name, ifMatch string) error
 }
 
 // Option is a configuration option for MemoryStorage.
@@ -96,6 +112,8 @@ type MemoryStorage struct {
 	OriginAccessControls    map[string]*OriginAccessControl     `json:"originAccessControls,omitempty"`
 	CachePolicies           map[string]*CachePolicy             `json:"cachePolicies,omitempty"`
 	ResponseHeadersPolicies map[string]*ResponseHeadersPolicy   `json:"responseHeadersPolicies,omitempty"`
+	OriginRequestPolicies   map[string]*OriginRequestPolicy     `json:"originRequestPolicies,omitempty"`
+	Functions               map[string]*Function                `json:"functions,omitempty"` // keyed by name
 	signing                 signingStore
 	dataDir                 string
 }
@@ -108,6 +126,8 @@ func NewMemoryStorage(opts ...Option) *MemoryStorage {
 		OriginAccessControls:    make(map[string]*OriginAccessControl),
 		CachePolicies:           make(map[string]*CachePolicy),
 		ResponseHeadersPolicies: make(map[string]*ResponseHeadersPolicy),
+		OriginRequestPolicies:   make(map[string]*OriginRequestPolicy),
+		Functions:               make(map[string]*Function),
 		signing: signingStore{
 			PublicKeys: make(map[string]*PublicKey),
 			KeyGroups:  make(map[string]*KeyGroup),
@@ -164,6 +184,8 @@ func (s *MemoryStorage) UnmarshalJSON(data []byte) error {
 	s.ensureOACInit()
 	s.ensureCachePolicyInit()
 	s.ensureResponseHeadersPolicyInit()
+	s.ensureOriginRequestPolicyInit()
+	s.ensureFunctionInit()
 
 	return nil
 }
@@ -221,6 +243,10 @@ func (s *MemoryStorage) CreateDistribution(_ context.Context, config *CreateDist
 	}
 
 	if err := s.validatePolicyReferencesLocked(distConfig); err != nil {
+		return nil, err
+	}
+
+	if err := s.validateFunctionAssociationsLocked(distConfig); err != nil {
 		return nil, err
 	}
 
@@ -340,6 +366,10 @@ func (s *MemoryStorage) UpdateDistribution(_ context.Context, id string, config 
 		return nil, err
 	}
 
+	if err := s.validateFunctionAssociationsLocked(distConfig); err != nil {
+		return nil, err
+	}
+
 	dist.ETag = generateETag()
 	dist.LastModifiedTime = time.Now()
 	dist.Status = distributionStatusDeployed
@@ -367,7 +397,61 @@ func newDistributionConfig(config *CreateDistributionRequest) *DistributionConfi
 		Aliases:              convertAliasesFromXML(config.Aliases),
 		ViewerCertificate:    convertViewerCertificateFromXML(config.ViewerCertificate),
 		Logging:              convertLoggingFromXML(config.Logging),
+		CustomErrorResponses: convertCustomErrorResponsesFromXML(config.CustomErrorResponses),
+		Restrictions:         convertRestrictionsFromXML(config.Restrictions),
+		WebACLID:             config.WebACLID,
 	}
+}
+
+// convertCustomErrorResponsesFromXML stores the custom error responses in
+// list order; Quantity follows the items actually present.
+func convertCustomErrorResponsesFromXML(in *CustomErrorResponsesXML) *CustomErrorResponsesXML {
+	if in == nil || len(in.Items) == 0 {
+		return nil
+	}
+
+	out := &CustomErrorResponsesXML{Quantity: len(in.Items), Items: make([]CustomErrorResponseXML, len(in.Items))}
+
+	for i, item := range in.Items {
+		item.ErrorCachingMinTTL = clonePtr(item.ErrorCachingMinTTL)
+		out.Items[i] = item
+	}
+
+	return out
+}
+
+// convertRestrictionsFromXML stores the geo restriction, Quantity following
+// the locations actually present.
+func convertRestrictionsFromXML(in *RestrictionsXML) *RestrictionsXML {
+	if in == nil || in.GeoRestriction == nil {
+		return nil
+	}
+
+	geo := *in.GeoRestriction
+	geo.Items = slices.Clone(geo.Items)
+	geo.Quantity = len(geo.Items)
+
+	return &RestrictionsXML{GeoRestriction: &geo}
+}
+
+// convertFunctionAssociationsFromXML stores the CloudFront Function
+// associations; Quantity follows the items actually present.
+func convertFunctionAssociationsFromXML(in *FunctionAssociationsXML) *FunctionAssociationsXML {
+	if in == nil || len(in.Items) == 0 {
+		return nil
+	}
+
+	return &FunctionAssociationsXML{Quantity: len(in.Items), Items: slices.Clone(in.Items)}
+}
+
+// convertLambdaFunctionAssociationsFromXML stores the Lambda@Edge
+// associations; Quantity follows the items actually present.
+func convertLambdaFunctionAssociationsFromXML(in *LambdaFunctionAssociationsXML) *LambdaFunctionAssociationsXML {
+	if in == nil || len(in.Items) == 0 {
+		return nil
+	}
+
+	return &LambdaFunctionAssociationsXML{Quantity: len(in.Items), Items: slices.Clone(in.Items)}
 }
 
 // validateTargetOrigins rejects behaviors whose TargetOriginId names no
@@ -692,6 +776,9 @@ func convertDefaultCacheBehaviorFromXML(behavior *DefaultCacheBehaviorXML) *Defa
 		ResponseHeadersPolicyID: behavior.ResponseHeadersPolicyID,
 		FieldLevelEncryptionID:  behavior.FieldLevelEncryptionID,
 		RealtimeLogConfigArn:    behavior.RealtimeLogConfigArn,
+
+		FunctionAssociations:       convertFunctionAssociationsFromXML(behavior.FunctionAssociations),
+		LambdaFunctionAssociations: convertLambdaFunctionAssociationsFromXML(behavior.LambdaFunctionAssociations),
 	}
 
 	convertAllowedMethodsFromXML(behavior.AllowedMethods, result)

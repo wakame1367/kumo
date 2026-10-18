@@ -35,6 +35,9 @@ type DistributionConfig struct {
 	HTTPVersion          string
 	IsIPV6Enabled        bool
 	Logging              *LoggingConfig
+	CustomErrorResponses *CustomErrorResponsesXML
+	Restrictions         *RestrictionsXML
+	WebACLID             string
 }
 
 // LoggingConfig represents standard (legacy) access log settings. kumo stores
@@ -104,6 +107,9 @@ type DefaultCacheBehavior struct {
 	TrustedKeyGroups        *TrustedKeyGroups
 	FieldLevelEncryptionID  string
 	RealtimeLogConfigArn    string
+
+	FunctionAssociations       *FunctionAssociationsXML
+	LambdaFunctionAssociations *LambdaFunctionAssociationsXML
 }
 
 // AllowedMethods represents allowed HTTP methods.
@@ -269,11 +275,14 @@ type DistributionConfigXML struct {
 	OriginGroups         *OriginGroupsXML         `xml:"OriginGroups,omitempty"`
 	DefaultCacheBehavior *DefaultCacheBehaviorXML `xml:"DefaultCacheBehavior"`
 	CacheBehaviors       *CacheBehaviorsXML       `xml:"CacheBehaviors,omitempty"`
+	CustomErrorResponses *CustomErrorResponsesXML `xml:"CustomErrorResponses,omitempty"`
 	Comment              string                   `xml:"Comment"`
 	Logging              *LoggingConfigXML        `xml:"Logging,omitempty"`
 	Enabled              bool                     `xml:"Enabled"`
 	PriceClass           string                   `xml:"PriceClass,omitempty"`
 	ViewerCertificate    *ViewerCertificateXML    `xml:"ViewerCertificate,omitempty"`
+	Restrictions         *RestrictionsXML         `xml:"Restrictions,omitempty"`
+	WebACLID             string                   `xml:"WebACLId,omitempty"`
 	HTTPVersion          string                   `xml:"HttpVersion,omitempty"`
 	IsIPV6Enabled        bool                     `xml:"IsIPV6Enabled,omitempty"`
 }
@@ -371,15 +380,39 @@ type DefaultCacheBehaviorXML struct {
 }
 
 // LambdaFunctionAssociationsXML represents Lambda@Edge associations in XML
-// format. kumo does not implement them, so only the empty form is emitted.
+// format. kumo stores them but does not run Lambda@Edge.
 type LambdaFunctionAssociationsXML struct {
-	Quantity int `xml:"Quantity"`
+	Quantity int                            `xml:"Quantity"`
+	Items    []LambdaFunctionAssociationXML `xml:"Items>LambdaFunctionAssociation,omitempty"`
+}
+
+// LambdaFunctionAssociationXML is one Lambda@Edge association.
+type LambdaFunctionAssociationXML struct {
+	LambdaFunctionARN string `xml:"LambdaFunctionARN"`
+	EventType         string `xml:"EventType"`
+	IncludeBody       bool   `xml:"IncludeBody"`
 }
 
 // FunctionAssociationsXML represents CloudFront Function associations in XML
-// format. kumo does not implement them, so only the empty form is emitted.
+// format. kumo stores them but does not run CloudFront Functions code.
 type FunctionAssociationsXML struct {
-	Quantity int `xml:"Quantity"`
+	Quantity int                      `xml:"Quantity"`
+	Items    []FunctionAssociationXML `xml:"Items>FunctionAssociation,omitempty"`
+}
+
+// FunctionAssociationXML is one CloudFront Function association.
+type FunctionAssociationXML struct {
+	FunctionARN string `xml:"FunctionARN"`
+	EventType   string `xml:"EventType"`
+}
+
+// items is nil-safe access to the associations.
+func (a *FunctionAssociationsXML) items() []FunctionAssociationXML {
+	if a == nil {
+		return nil
+	}
+
+	return a.Items
 }
 
 // AllowedMethodsXML represents allowed methods in XML format.
@@ -468,7 +501,17 @@ type GeoRestrictionXML struct {
 
 // CustomErrorResponsesXML represents custom error responses in XML format.
 type CustomErrorResponsesXML struct {
-	Quantity int `xml:"Quantity"`
+	Quantity int                      `xml:"Quantity"`
+	Items    []CustomErrorResponseXML `xml:"Items>CustomErrorResponse,omitempty"`
+}
+
+// CustomErrorResponseXML replaces an origin error response: the edge serves
+// ResponsePagePath with ResponseCode instead of the origin's ErrorCode.
+type CustomErrorResponseXML struct {
+	ErrorCode          int    `xml:"ErrorCode"`
+	ResponsePagePath   string `xml:"ResponsePagePath,omitempty"`
+	ResponseCode       string `xml:"ResponseCode,omitempty"`
+	ErrorCachingMinTTL *int64 `xml:"ErrorCachingMinTTL,omitempty"`
 }
 
 // ViewerCertificateXML represents viewer certificate in XML format.
@@ -543,11 +586,14 @@ type CreateDistributionRequest struct {
 	Origins              *OriginsXML              `xml:"Origins"`
 	DefaultCacheBehavior *DefaultCacheBehaviorXML `xml:"DefaultCacheBehavior"`
 	CacheBehaviors       *CacheBehaviorsXML       `xml:"CacheBehaviors,omitempty"`
+	CustomErrorResponses *CustomErrorResponsesXML `xml:"CustomErrorResponses,omitempty"`
 	Comment              string                   `xml:"Comment"`
 	Logging              *LoggingConfigXML        `xml:"Logging,omitempty"`
 	Enabled              bool                     `xml:"Enabled"`
 	PriceClass           string                   `xml:"PriceClass,omitempty"`
 	ViewerCertificate    *ViewerCertificateXML    `xml:"ViewerCertificate,omitempty"`
+	Restrictions         *RestrictionsXML         `xml:"Restrictions,omitempty"`
+	WebACLID             string                   `xml:"WebACLId,omitempty"`
 	HTTPVersion          string                   `xml:"HttpVersion,omitempty"`
 	IsIPV6Enabled        bool                     `xml:"IsIPV6Enabled,omitempty"`
 }

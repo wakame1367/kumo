@@ -92,8 +92,28 @@ func (s *Service) RegisterRoutes(r service.Router) {
 	r.Handle("PUT", "/2020-05-31/response-headers-policy/{id}", s.UpdateResponseHeadersPolicy)
 	r.Handle("DELETE", "/2020-05-31/response-headers-policy/{id}", s.DeleteResponseHeadersPolicy)
 
-	// Edge — proxies real requests through the cache layer.
-	for _, method := range []string{"GET", "HEAD", "PUT", "POST", "DELETE", "PATCH"} {
+	// Origin request policy — viewer values forwarded to the origin by cache behaviors.
+	r.Handle("POST", "/2020-05-31/origin-request-policy", s.CreateOriginRequestPolicy)
+	r.Handle("GET", "/2020-05-31/origin-request-policy", s.ListOriginRequestPolicies)
+	r.Handle("GET", "/2020-05-31/origin-request-policy/{id}", s.GetOriginRequestPolicy)
+	r.Handle("GET", "/2020-05-31/origin-request-policy/{id}/config", s.GetOriginRequestPolicyConfig)
+	r.Handle("PUT", "/2020-05-31/origin-request-policy/{id}", s.UpdateOriginRequestPolicy)
+	r.Handle("DELETE", "/2020-05-31/origin-request-policy/{id}", s.DeleteOriginRequestPolicy)
+
+	// CloudFront Functions — viewer request/response code associated with cache behaviors.
+	r.Handle("POST", "/2020-05-31/function", s.CreateFunction)
+	r.Handle("GET", "/2020-05-31/function", s.ListFunctions)
+	r.Handle("GET", "/2020-05-31/function/{name}", s.GetFunction)
+	r.Handle("GET", "/2020-05-31/function/{name}/describe", s.DescribeFunction)
+	r.Handle("PUT", "/2020-05-31/function/{name}", s.UpdateFunction)
+	r.Handle("POST", "/2020-05-31/function/{name}/publish", s.PublishFunction)
+	r.Handle("DELETE", "/2020-05-31/function/{name}", s.DeleteFunction)
+
+	// Edge — proxies real requests through the cache layer. The router cleans
+	// the trailing slash off /kumo/cdn/{id}/, so the distribution root is
+	// registered on its own.
+	for _, method := range []string{"GET", "HEAD", "PUT", "POST", "DELETE", "PATCH", "OPTIONS"} {
+		r.Handle(method, "/kumo/cdn/{distributionId}", s.Edge)
 		r.Handle(method, "/kumo/cdn/{distributionId}/{path...}", s.Edge)
 	}
 }

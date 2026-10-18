@@ -11,6 +11,10 @@ const (
 	errCachePolicyAlreadyExists = "CachePolicyAlreadyExists"
 	errCachePolicyInUse         = "CachePolicyInUse"
 	errInconsistentQuantities   = "InconsistentQuantities"
+
+	// AWS-managed policies are read-only.
+	errIllegalUpdate = "IllegalUpdate"
+	errIllegalDelete = "IllegalDelete"
 )
 
 // Cache policy enumerations and documented defaults.
@@ -36,6 +40,17 @@ type CachePolicy struct {
 	ETag             string
 	LastModifiedTime time.Time
 	Config           CachePolicyConfig
+	// managed marks an AWS-managed policy; those are never stored.
+	managed bool
+}
+
+// summaryType is the CachePolicySummary Type of the policy.
+func (p *CachePolicy) summaryType() string {
+	if p.managed {
+		return cachePolicyTypeManaged
+	}
+
+	return cachePolicyTypeCustom
 }
 
 // CachePolicyConfig is the user-supplied configuration. It doubles as the

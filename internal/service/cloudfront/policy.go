@@ -70,6 +70,10 @@ func (s *MemoryStorage) validatePolicyReferencesLocked(config *DistributionConfi
 		if id := b.ResponseHeadersPolicyID; id != "" && !s.responseHeadersPolicyExistsLocked(id) {
 			return &Error{Code: errNoSuchResponseHeadersPolicy, Message: "The response headers policy does not exist."}
 		}
+
+		if id := b.OriginRequestPolicyID; id != "" && !s.originRequestPolicyExistsLocked(id) {
+			return noSuchOriginRequestPolicy()
+		}
 	}
 
 	return nil

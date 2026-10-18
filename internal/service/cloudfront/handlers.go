@@ -291,7 +291,8 @@ func handleStorageError(w http.ResponseWriter, err error) {
 		status := http.StatusBadRequest
 
 		switch cfErr.Code {
-		case errDistributionNotFound, errNoSuchInvalidation, errNoSuchOrigin, errNoSuchResource, errNoSuchCachePolicy, errNoSuchResponseHeadersPolicy:
+		case errDistributionNotFound, errNoSuchInvalidation, errNoSuchOrigin, errNoSuchResource, errNoSuchCachePolicy, errNoSuchResponseHeadersPolicy,
+			errNoSuchOriginRequestPolicy, errNoSuchFunctionExists:
 			status = http.StatusNotFound
 		case errPreconditionFailed, errInvalidIfMatchVersion:
 			status = http.StatusPreconditionFailed
@@ -353,8 +354,31 @@ func buildDistributionConfigXML(config *DistributionConfig) *DistributionConfigX
 	result.Aliases = buildAliasesConfigXML(config.Aliases)
 	result.ViewerCertificate = buildViewerCertificateConfigXML(config.ViewerCertificate)
 	result.Logging = buildLoggingXML(config.Logging)
+	result.CustomErrorResponses = buildCustomErrorResponsesXML(config.CustomErrorResponses)
+	result.Restrictions = buildRestrictionsXML(config.Restrictions)
+	result.WebACLID = config.WebACLID
 
 	return result
+}
+
+// buildCustomErrorResponsesXML always returns CustomErrorResponses, as
+// CloudFront does, with Quantity 0 when none are configured.
+func buildCustomErrorResponsesXML(in *CustomErrorResponsesXML) *CustomErrorResponsesXML {
+	if in == nil {
+		return &CustomErrorResponsesXML{}
+	}
+
+	return in
+}
+
+// buildRestrictionsXML always returns Restrictions, as CloudFront does: a
+// distribution created without them reads back with no geo restriction.
+func buildRestrictionsXML(in *RestrictionsXML) *RestrictionsXML {
+	if in == nil {
+		return &RestrictionsXML{GeoRestriction: &GeoRestrictionXML{RestrictionType: "none"}}
+	}
+
+	return in
 }
 
 // buildLoggingXML always returns Logging, as CloudFront does: a distribution
@@ -468,7 +492,14 @@ func buildDefaultCacheBehaviorXML(dcb *DefaultCacheBehavior) *DefaultCacheBehavi
 	buildTrustedKeyGroupsXML(dcb.TrustedKeyGroups, result)
 
 	result.LambdaFunctionAssociations = &LambdaFunctionAssociationsXML{}
+	if dcb.LambdaFunctionAssociations != nil {
+		result.LambdaFunctionAssociations = dcb.LambdaFunctionAssociations
+	}
+
 	result.FunctionAssociations = &FunctionAssociationsXML{}
+	if dcb.FunctionAssociations != nil {
+		result.FunctionAssociations = dcb.FunctionAssociations
+	}
 
 	return result
 }
@@ -664,15 +695,10 @@ func buildDistributionSummaryXML(d *Distribution) DistributionSummaryXML {
 		HTTPVersion:          d.DistributionConfig.HTTPVersion,
 		IsIPV6Enabled:        d.DistributionConfig.IsIPV6Enabled,
 		CacheBehaviors:       buildCacheBehaviorsXML(d.DistributionConfig.CacheBehaviors),
-		CustomErrorResponses: &CustomErrorResponsesXML{Quantity: 0},
-		Restrictions: &RestrictionsXML{
-			GeoRestriction: &GeoRestrictionXML{
-				RestrictionType: "none",
-				Quantity:        0,
-			},
-		},
-		WebACLId: "",
-		Staging:  false,
+		CustomErrorResponses: buildCustomErrorResponsesXML(d.DistributionConfig.CustomErrorResponses),
+		Restrictions:         buildRestrictionsXML(d.DistributionConfig.Restrictions),
+		WebACLId:             d.DistributionConfig.WebACLID,
+		Staging:              false,
 	}
 
 	summary.Aliases = buildSummaryAliasesXML(d.DistributionConfig.Aliases)

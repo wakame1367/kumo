@@ -278,6 +278,8 @@ func (s *Service) Edge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	applyDefaultRootObject(r, dist)
+
 	// The matched cache behaviour drives signed-URL enforcement, the origin
 	// and the TTLs below. The cache key stays path-based: the path alone
 	// selects the behaviour, so entries can never cross behaviours.
@@ -293,7 +295,7 @@ func (s *Service) Edge(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !isCacheableMethod(r.Method) {
-		s.passthrough(w, r, target)
+		s.passthrough(w, r, dist, target)
 
 		return
 	}
@@ -325,6 +327,8 @@ func (s *Service) Edge(w http.ResponseWriter, r *http.Request) {
 
 		return
 	}
+
+	upstream = s.applyCustomErrorResponse(r, dist, upstream)
 
 	if !clientCC.NoStore {
 		storeIfCacheable(s.edgeCache, distID, base, r, upstream, cfg)
@@ -595,8 +599,8 @@ func isHopByHopHeader(name string) bool {
 }
 
 // passthrough forwards the request body verbatim, returns the response
-// without touching the cache. Used for PUT / POST / DELETE / PATCH.
-func (s *Service) passthrough(w http.ResponseWriter, r *http.Request, target upstreamTarget) {
+// without touching the cache. Used for PUT / POST / DELETE / PATCH / OPTIONS.
+func (s *Service) passthrough(w http.ResponseWriter, r *http.Request, dist *Distribution, target upstreamTarget) {
 	upstream, err := forwardOrigin(target, r)
 	if err != nil {
 		http.Error(w, "origin fetch failed: "+err.Error(), http.StatusBadGateway)
@@ -604,7 +608,7 @@ func (s *Service) passthrough(w http.ResponseWriter, r *http.Request, target ups
 		return
 	}
 
-	writeUpstream(w, upstream, "Bypass from kumo", 0)
+	writeUpstream(w, s.applyCustomErrorResponse(r, dist, upstream), "Bypass from kumo", 0)
 }
 
 // edgeCacheConfig pulls the [MinTTL, DefaultTTL, MaxTTL] triple out of the
