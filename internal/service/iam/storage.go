@@ -595,7 +595,7 @@ func (s *MemoryStorage) GetPolicy(_ context.Context, policyArn string) (*Policy,
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	policy, exists := s.Policies[policyArn]
+	policy, exists := s.policyLocked(policyArn, false)
 	if !exists {
 		return nil, &Error{
 			Code:    errNoSuchEntity,
@@ -653,7 +653,7 @@ func (s *MemoryStorage) AttachUserPolicy(_ context.Context, userName, policyArn 
 		}
 	}
 
-	policy, exists := s.Policies[policyArn]
+	policy, exists := s.policyLocked(policyArn, true)
 	if !exists {
 		return &Error{
 			Code:    errNoSuchEntity,
@@ -691,7 +691,7 @@ func (s *MemoryStorage) DetachUserPolicy(_ context.Context, userName, policyArn 
 		}
 	}
 
-	policy, exists := s.Policies[policyArn]
+	policy, exists := s.policyLocked(policyArn, true)
 	if !exists {
 		return &Error{
 			Code:    errNoSuchEntity,
@@ -737,7 +737,7 @@ func (s *MemoryStorage) AttachRolePolicy(_ context.Context, roleName, policyArn 
 		}
 	}
 
-	policy, exists := s.Policies[policyArn]
+	policy, exists := s.policyLocked(policyArn, true)
 	if !exists {
 		return &Error{
 			Code:    errNoSuchEntity,
@@ -775,7 +775,7 @@ func (s *MemoryStorage) DetachRolePolicy(_ context.Context, roleName, policyArn 
 		}
 	}
 
-	policy, exists := s.Policies[policyArn]
+	policy, exists := s.policyLocked(policyArn, true)
 	if !exists {
 		return &Error{
 			Code:    errNoSuchEntity,
