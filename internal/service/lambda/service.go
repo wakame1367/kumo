@@ -92,7 +92,12 @@ func (s *Service) registerAPIRoutes(r service.Router) {
 	// CreateFunction; without these the apply errors immediately on
 	// the post-create read.
 	r.Handle("GET", "/2015-03-31/functions/{functionName}/versions", s.ListVersionsByFunction)
+	r.Handle("POST", "/2015-03-31/functions/{functionName}/versions", s.PublishVersion)
 	r.Handle("GET", "/2015-03-31/functions/{functionName}/aliases", s.ListAliases)
+	r.Handle("POST", "/2015-03-31/functions/{functionName}/aliases", s.CreateAlias)
+	r.Handle("GET", "/2015-03-31/functions/{functionName}/aliases/{aliasName}", s.GetAlias)
+	r.Handle("PUT", "/2015-03-31/functions/{functionName}/aliases/{aliasName}", s.UpdateAlias)
+	r.Handle("DELETE", "/2015-03-31/functions/{functionName}/aliases/{aliasName}", s.DeleteAlias)
 	r.Handle("GET", "/2015-03-31/functions/{functionName}/policy", s.GetPolicy)
 	r.Handle("POST", "/2015-03-31/functions/{functionName}/policy", s.AddPermission)
 	r.Handle("DELETE", "/2015-03-31/functions/{functionName}/policy/{statementId}", s.RemovePermission)

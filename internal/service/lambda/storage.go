@@ -18,8 +18,7 @@ import (
 // Default values.
 const defaultRegion = "us-east-1"
 
-// latestVersion is the only function version kumo has: it publishes no
-// versions or aliases.
+// latestVersion is the unpublished, mutable version of every function.
 const latestVersion = "$LATEST"
 
 // Storage defines the Lambda storage interface.
@@ -50,9 +49,18 @@ type Storage interface {
 	RemovePermission(ctx context.Context, functionName, statementID string) error
 	GetPolicy(ctx context.Context, functionName string) (*ResourcePolicy, error)
 
+	// Versions and aliases
+	PublishVersion(ctx context.Context, functionName, codeSha256, description string) (*Function, *FunctionVersion, error)
+	ListVersionsByFunction(ctx context.Context, functionName string) (*Function, []*FunctionVersion, error)
+	GetFunctionVersion(ctx context.Context, functionName, qualifier string) (*Function, *FunctionVersion, error)
+	DeleteFunctionVersion(ctx context.Context, functionName, version string) error
+	CreateAlias(ctx context.Context, functionName string, req *aliasRequest) (*Function, *Alias, error)
+	GetAlias(ctx context.Context, functionName, name string) (*Function, *Alias, error)
+	ListAliases(ctx context.Context, functionName string) (*Function, []*Alias, error)
+	UpdateAlias(ctx context.Context, functionName, name string, req *aliasRequest) (*Function, *Alias, error)
+	DeleteAlias(ctx context.Context, functionName, name string) error
+
 	// Read-only accessors
-	ListVersionsByFunction(ctx context.Context, functionName string) (*Function, error)
-	ListAliases(ctx context.Context, functionName string) error
 	ListFunctionEventInvokeConfigs(ctx context.Context, functionName string) error
 	GetFunctionCodeSigningConfig(ctx context.Context, functionName string) (string, error)
 
@@ -206,6 +214,10 @@ func (s *MemoryStorage) CreateFunction(_ context.Context, req *CreateFunctionReq
 	fn := s.buildFunction(req)
 	s.Functions[req.FunctionName] = fn
 
+	if req.Publish {
+		s.publishLocked(fn, "")
+	}
+
 	s.saveLocked()
 
 	return fn, nil
@@ -283,9 +295,9 @@ var functionNamePattern = regexp.MustCompile(
 		`(?::(?P<qualifier>\$LATEST(?:\.PUBLISHED)?|[a-zA-Z0-9-_]+))?$`)
 
 // lookupLocked finds the function a FunctionName refers to. As in the
-// Lambda API, it accepts the function name, the full ARN or a partial ARN.
-// kumo publishes no versions or aliases, so a qualifier resolves only when
-// it is $LATEST. A region or account that does not match this storage finds
+// Lambda API, it accepts the function name, the full ARN or a partial ARN,
+// optionally qualified by $LATEST, a published version or an alias of the
+// function. A region or account that does not match this storage finds
 // nothing. An exact key match wins, so a function whose name itself looks
 // like an ARN stays reachable by that name. The caller must hold s.mu.
 func (s *MemoryStorage) lookupLocked(functionName string) (*Function, bool) {
@@ -302,15 +314,16 @@ func (s *MemoryStorage) lookupLocked(functionName string) (*Function, bool) {
 	account := m[functionNamePattern.SubexpIndex("account")]
 	qualifier := m[functionNamePattern.SubexpIndex("qualifier")]
 
-	if (region != "" && region != s.region) ||
-		(account != "" && account != s.accountID) ||
-		(qualifier != "" && qualifier != latestVersion) {
+	if (region != "" && region != s.region) || (account != "" && account != s.accountID) {
 		return nil, false
 	}
 
 	fn, ok := s.Functions[m[functionNamePattern.SubexpIndex("name")]]
+	if !ok || !fn.hasQualifier(qualifier) {
+		return nil, false
+	}
 
-	return fn, ok
+	return fn, true
 }
 
 // GetFunction retrieves a Lambda function by name.
@@ -434,6 +447,10 @@ func (s *MemoryStorage) UpdateFunctionCode(_ context.Context, name string, req *
 	}
 
 	fn.LastModified = time.Now().UTC()
+
+	if req.Publish {
+		s.publishLocked(fn, "")
+	}
 
 	s.saveLocked()
 
@@ -674,37 +691,6 @@ func (s *MemoryStorage) UntagResource(_ context.Context, arn string, tagKeys []s
 		Type:    ErrResourceNotFound,
 		Message: fmt.Sprintf("Function not found: %s", arn),
 	}
-}
-
-// ListVersionsByFunction returns the function for version listing.
-func (s *MemoryStorage) ListVersionsByFunction(_ context.Context, functionName string) (*Function, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	fn, exists := s.lookupLocked(functionName)
-	if !exists {
-		return nil, &FunctionError{
-			Type:    ErrResourceNotFound,
-			Message: fmt.Sprintf("Function not found: %s", functionName),
-		}
-	}
-
-	return fn, nil
-}
-
-// ListAliases validates the function exists for alias listing.
-func (s *MemoryStorage) ListAliases(_ context.Context, functionName string) error {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	if _, exists := s.lookupLocked(functionName); !exists {
-		return &FunctionError{
-			Type:    ErrResourceNotFound,
-			Message: fmt.Sprintf("Function not found: %s", functionName),
-		}
-	}
-
-	return nil
 }
 
 // ListFunctionEventInvokeConfigs validates the function exists for event invoke config listing.

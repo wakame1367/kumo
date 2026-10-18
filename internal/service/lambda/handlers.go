@@ -64,7 +64,16 @@ func (s *Service) CreateFunction(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := functionToCreateResponse(fn)
+	if req.Publish {
+		resp.Version = publishedVersion(fn)
+	}
+
 	writeJSONResponse(w, http.StatusCreated, resp)
+}
+
+// publishedVersion is the number of the function's latest published version.
+func publishedVersion(fn *Function) string {
+	return strconv.Itoa(fn.LastVersion)
 }
 
 // GetFunction handles the GetFunction API.
@@ -76,21 +85,9 @@ func (s *Service) GetFunction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fn, err := s.storage.GetFunction(r.Context(), functionName)
+	fn, version, err := s.storage.GetFunctionVersion(r.Context(), functionName, r.URL.Query().Get("Qualifier"))
 	if err != nil {
-		var lambdaErr *FunctionError
-		if errors.As(err, &lambdaErr) {
-			status := http.StatusBadRequest
-			if lambdaErr.Type == ErrResourceNotFound {
-				status = http.StatusNotFound
-			}
-
-			writeFunctionError(w, lambdaErr.Type, lambdaErr.Message, status)
-
-			return
-		}
-
-		writeFunctionError(w, ErrServiceException, "Internal server error", http.StatusInternalServerError)
+		handleFunctionError(w, err)
 
 		return
 	}
@@ -105,7 +102,7 @@ func (s *Service) GetFunction(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := &GetFunctionResponse{
-		Configuration: functionToConfiguration(fn),
+		Configuration: qualifiedConfiguration(fn, version),
 		Code: &FunctionCodeLocation{
 			RepositoryType: "S3",
 			Location:       s.baseURL + "/lambda-code/" + fn.FunctionName,
@@ -126,14 +123,23 @@ func (s *Service) GetFunctionConfiguration(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	fn, err := s.storage.GetFunction(r.Context(), functionName)
+	fn, version, err := s.storage.GetFunctionVersion(r.Context(), functionName, r.URL.Query().Get("Qualifier"))
 	if err != nil {
 		handleGetFunctionError(w, err)
 
 		return
 	}
 
-	writeJSONResponse(w, http.StatusOK, functionToConfiguration(fn))
+	writeJSONResponse(w, http.StatusOK, qualifiedConfiguration(fn, version))
+}
+
+// qualifiedConfiguration renders $LATEST (version nil) or a published version.
+func qualifiedConfiguration(fn *Function, version *FunctionVersion) *FunctionConfiguration {
+	if version == nil {
+		return functionToConfiguration(fn)
+	}
+
+	return versionToConfiguration(fn, version)
 }
 
 // DeleteFunction handles the DeleteFunction API.
@@ -141,6 +147,18 @@ func (s *Service) DeleteFunction(w http.ResponseWriter, r *http.Request) {
 	functionName := extractFunctionName(r.URL.Path)
 	if functionName == "" {
 		writeFunctionError(w, ErrInvalidParameterValue, "FunctionName is required", http.StatusBadRequest)
+
+		return
+	}
+
+	if q := r.URL.Query().Get("Qualifier"); q != "" && q != latestVersion {
+		if err := s.storage.DeleteFunctionVersion(r.Context(), functionName, q); err != nil {
+			handleFunctionError(w, err)
+
+			return
+		}
+
+		w.WriteHeader(http.StatusNoContent)
 
 		return
 	}
@@ -236,6 +254,10 @@ func (s *Service) UpdateFunctionCode(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := functionToCreateResponse(fn)
+	if req.Publish {
+		resp.Version = publishedVersion(fn)
+	}
+
 	writeJSONResponse(w, http.StatusOK, resp)
 }
 
@@ -769,8 +791,14 @@ func handleFunctionError(w http.ResponseWriter, err error) {
 	var lambdaErr *FunctionError
 	if errors.As(err, &lambdaErr) {
 		status := http.StatusBadRequest
-		if lambdaErr.Type == ErrResourceNotFound {
+
+		switch lambdaErr.Type {
+		case ErrResourceNotFound:
 			status = http.StatusNotFound
+		case ErrResourceConflict:
+			status = http.StatusConflict
+		case ErrPreconditionFailed:
+			status = http.StatusPreconditionFailed
 		}
 
 		writeFunctionError(w, lambdaErr.Type, lambdaErr.Message, status)
@@ -797,59 +825,6 @@ func extractEventSourceMappingUUID(path string) string {
 	}
 
 	return ""
-}
-
-// ListVersionsByFunction returns a single $LATEST entry for any existing
-// function. terraform-provider-aws calls this on every refresh of
-// aws_lambda_function and apply errors immediately after CreateFunction
-// without it.
-func (s *Service) ListVersionsByFunction(w http.ResponseWriter, r *http.Request) {
-	name := extractFunctionNameForListChild(r.URL.Path, "versions")
-	if name == "" {
-		writeFunctionError(w, "InvalidParameterValueException", "FunctionName is required", http.StatusBadRequest)
-
-		return
-	}
-
-	fn, err := s.storage.ListVersionsByFunction(r.Context(), name)
-	if err != nil {
-		writeFunctionError(w, "ResourceNotFoundException", err.Error(), http.StatusNotFound)
-
-		return
-	}
-
-	writeJSONResponse(w, http.StatusOK, listVersionsByFunctionResponse{
-		Versions: []functionConfigurationVersion{
-			{
-				FunctionName: fn.FunctionName,
-				FunctionArn:  fn.FunctionArn,
-				Runtime:      fn.Runtime,
-				Role:         fn.Role,
-				Handler:      fn.Handler,
-				Version:      latestVersion,
-				LastModified: fn.LastModified.UTC().Format("2006-01-02T15:04:05.000+0000"),
-			},
-		},
-	})
-}
-
-// ListAliases returns an empty Aliases list. terraform-provider-aws calls
-// this on every refresh of aws_lambda_function. Aliases are not modeled.
-func (s *Service) ListAliases(w http.ResponseWriter, r *http.Request) {
-	name := extractFunctionNameForListChild(r.URL.Path, "aliases")
-	if name == "" {
-		writeFunctionError(w, ErrInvalidParameterValue, "FunctionName is required", http.StatusBadRequest)
-
-		return
-	}
-
-	if err := s.storage.ListAliases(r.Context(), name); err != nil {
-		handleFunctionError(w, err)
-
-		return
-	}
-
-	writeJSONResponse(w, http.StatusOK, listAliasesResponse{Aliases: []aliasConfiguration{}})
 }
 
 // GetFunctionCodeSigningConfig reports no code-signing config for any
