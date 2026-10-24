@@ -163,10 +163,33 @@ func (s *MemoryStorage) normalizeLoadedRecordSets(logger *slog.Logger) {
 			records[i].Name = normalizeDNSName(records[i].Name)
 		}
 
+		records = dropUnnamedRecordSets(logger, zoneID, records)
 		records = coalesceRecordSets(logger, zoneID, records)
 		s.RecordSets[zoneID] = records
 		zone.ResourceRecordSetCount = int64(len(records))
 	}
+}
+
+// dropUnnamedRecordSets drops record sets with an empty name, which earlier
+// versions stored as sent. ChangeRecordSets rejects a change without a Name,
+// so no API could delete them, and one of a type other than NS or SOA would
+// keep DeleteHostedZone from deleting the zone. Each one is logged in full so
+// its content is not lost.
+func dropUnnamedRecordSets(logger *slog.Logger, zoneID string, records []ResourceRecordSet) []ResourceRecordSet {
+	named := make([]ResourceRecordSet, 0, len(records))
+
+	for i := range records {
+		if records[i].Name == "" {
+			logger.Warn("route53: dropped a record set without a name from snapshot",
+				"zone", zoneID, "recordSet", snapshotJSON(records[i]))
+
+			continue
+		}
+
+		named = append(named, records[i])
+	}
+
+	return named
 }
 
 // coalesceRecordSets keeps one record set per name, type and set identifier.

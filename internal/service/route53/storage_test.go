@@ -276,6 +276,72 @@ func TestLoadDropsRecordSetsOfMissingZone(t *testing.T) {
 	}
 }
 
+func TestLoadDropsRecordSetsWithoutName(t *testing.T) {
+	t.Parallel()
+
+	// Earlier versions stored a change with an empty Name as sent. No change
+	// can name such a record set any more, so it could never be deleted, and
+	// it kept the zone from being deleted.
+	s := loadSnapshot(t, []ResourceRecordSet{
+		newTestRecordSet("", "192.0.2.5"),
+		newTestRecordSet("www.example.com.", "192.0.2.1"),
+	})
+
+	if got, want := recordSummaries(t, s), []string{testCreatedRecord}; !slices.Equal(got, want) {
+		t.Fatalf("records after load = %q, want %q", got, want)
+	}
+
+	zone, err := s.GetHostedZone(testZoneID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if zone.ResourceRecordSetCount != 1 {
+		t.Fatalf("ResourceRecordSetCount = %d, want 1", zone.ResourceRecordSetCount)
+	}
+
+	del := Change{Action: testActionDelete, ResourceRecordSet: newTestRecordSet("www.example.com.", "192.0.2.1")}
+	if err := s.ChangeRecordSets(testZoneID, []Change{del}); err != nil {
+		t.Fatalf("DELETE: %v", err)
+	}
+
+	if err := s.DeleteHostedZone(testZoneID); err != nil {
+		t.Fatalf("DeleteHostedZone: %v", err)
+	}
+}
+
+func TestDropUnnamedRecordSetsLogsThem(t *testing.T) {
+	t.Parallel()
+
+	var logs bytes.Buffer
+
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	unnamed := newTestRecordSet("", "192.0.2.5")
+	named := newTestRecordSet("www.example.com.", "192.0.2.1")
+
+	got := dropUnnamedRecordSets(logger, testZoneID, []ResourceRecordSet{unnamed, named})
+	if !reflect.DeepEqual(got, []ResourceRecordSet{named}) {
+		t.Fatalf("kept = %+v, want only the named record set", got)
+	}
+
+	var entry struct {
+		RecordSet string `json:"recordSet"`
+	}
+
+	if err := json.Unmarshal(logs.Bytes(), &entry); err != nil {
+		t.Fatalf("log line %q: %v", logs.String(), err)
+	}
+
+	var restored ResourceRecordSet
+	if err := json.Unmarshal([]byte(entry.RecordSet), &restored); err != nil {
+		t.Fatalf("logged record set %q: %v", entry.RecordSet, err)
+	}
+
+	if !reflect.DeepEqual(restored, unnamed) {
+		t.Fatalf("logged record set = %+v, want %+v", restored, unnamed)
+	}
+}
+
 func TestCoalesceRecordSetsLogsDroppedRecordSet(t *testing.T) {
 	t.Parallel()
 
