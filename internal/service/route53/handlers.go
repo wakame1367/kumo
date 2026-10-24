@@ -403,6 +403,14 @@ func (s *Service) ChangeResourceRecordSets(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	for i := range req.ChangeBatch.Changes {
+		if req.ChangeBatch.Changes[i].ResourceRecordSet.Name == "" {
+			writeErrorResponse(w, http.StatusBadRequest, "InvalidInput", "ResourceRecordSet Name is required")
+
+			return
+		}
+	}
+
 	zoneID := "/hostedzone/" + id
 
 	if err := s.storage.ChangeRecordSets(zoneID, req.ChangeBatch.Changes); err != nil {

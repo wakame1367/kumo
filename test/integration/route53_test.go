@@ -614,6 +614,22 @@ func TestRoute53_RecordNameIsCaseInsensitive(t *testing.T) {
 	assertZoneGolden(t, t.Name()+"_delete", zoneName, listRecordSets(t, client, zoneID))
 }
 
+func TestRoute53_ChangeResourceRecordSets_EmptyName(t *testing.T) {
+	t.Parallel()
+
+	client := newRoute53Client(t)
+	ctx := t.Context()
+	zoneID, zoneName := createRecordTestZone(t, client, "empty-name-test")
+
+	// The SDK rejects a nil Name before sending the request, so send an
+	// empty one.
+	err := changeRecordSets(ctx, client, zoneID, aRecordChange(types.ChangeActionCreate, "", 300, "192.0.2.1"))
+	assertAPIErrorCode(t, err, "InvalidInput")
+
+	// Nothing was stored, not even under the root name.
+	assertZoneGolden(t, t.Name()+"_list", zoneName, listRecordSets(t, client, zoneID))
+}
+
 func TestRoute53_ListHostedZones_Pagination(t *testing.T) {
 	// Not parallel: pagination assertions require a stable view of the
 	// hosted zones list, which other parallel tests mutate.
