@@ -2,6 +2,7 @@ package acm
 
 import (
 	"context"
+	"crypto"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -83,13 +84,20 @@ type MemoryStorage struct {
 	mu           sync.RWMutex            `json:"-"`
 	Certificates map[string]*Certificate `json:"certificates"`
 	dataDir      string
-	ca           *localCA
+	// caMu guards ca. Certificates are issued without holding mu, so the CA
+	// has a lock of its own.
+	caMu sync.Mutex
+	ca   *localCA
+	// newKey generates the private key of an issued certificate; tests
+	// replace it to check that it runs without mu held.
+	newKey func(keyAlgorithm string) (crypto.Signer, error)
 }
 
 // NewMemoryStorage creates a new in-memory storage.
 func NewMemoryStorage(opts ...Option) *MemoryStorage {
 	s := &MemoryStorage{
 		Certificates: make(map[string]*Certificate),
+		newKey:       generateKey,
 	}
 	for _, o := range opts {
 		o(s)
@@ -212,11 +220,11 @@ func validationRecord(domain string) *ResourceRecord {
 	}
 }
 
-// RequestCertificate requests a new certificate.
+// RequestCertificate requests a new certificate. An issued certificate gets
+// its key and certificate before the storage is locked, so generating them
+// does not block the other operations, and it is stored together with that
+// material, so it is never visible as ISSUED without it.
 func (s *MemoryStorage) RequestCertificate(_ context.Context, req *RequestCertificateInput) (*Certificate, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	if req.DomainName == "" {
 		return nil, &Error{
 			Code:    errInvalidParameter,
@@ -265,9 +273,12 @@ func (s *MemoryStorage) RequestCertificate(_ context.Context, req *RequestCertif
 		Tags:                    slices.Clone(req.Tags),
 	}
 
-	if err := s.issueLocked(cert, now); err != nil {
+	if err := s.issue(cert, now); err != nil {
 		return nil, err
 	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	s.Certificates[arn] = cert
 

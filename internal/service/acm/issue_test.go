@@ -1,6 +1,7 @@
 package acm
 
 import (
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/rsa"
 	"crypto/x509"
@@ -206,6 +207,40 @@ func TestGetCertificate_IssuedWithoutMaterial(t *testing.T) {
 
 	if store.Certificates[arn].CertificateBody != "" {
 		t.Error("GetCertificate generated material")
+	}
+}
+
+// TestRequestCertificate_IssuesOutsideStorageLock checks that the key of an
+// issued certificate is generated while the storage lock is free, so a slow
+// key does not block the other operations.
+func TestRequestCertificate_IssuesOutsideStorageLock(t *testing.T) {
+	t.Parallel()
+
+	store := NewMemoryStorage()
+
+	var lockHeld bool
+
+	store.newKey = func(keyAlgorithm string) (crypto.Signer, error) {
+		if store.mu.TryLock() {
+			store.mu.Unlock()
+		} else {
+			lockHeld = true
+		}
+
+		return generateKey(keyAlgorithm)
+	}
+
+	requested, err := store.RequestCertificate(t.Context(), &RequestCertificateInput{DomainName: "unlocked.example.com"})
+	if err != nil {
+		t.Fatalf("RequestCertificate: %v", err)
+	}
+
+	if lockHeld {
+		t.Error("RequestCertificate generated the key while holding the storage lock")
+	}
+
+	if requested.CertificateBody == "" {
+		t.Error("issued certificate has no material")
 	}
 }
 

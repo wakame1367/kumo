@@ -67,9 +67,11 @@ func newLocalCA(now time.Time) (*localCA, error) {
 	return &localCA{cert: cert, key: key, certPEM: encodePEM("CERTIFICATE", der)}, nil
 }
 
-// caLocked returns the storage's CA, generating it on first use. The caller
-// must hold s.mu for writing.
-func (s *MemoryStorage) caLocked(now time.Time) (*localCA, error) {
+// issuingCA returns the storage's CA, generating it on first use.
+func (s *MemoryStorage) issuingCA(now time.Time) (*localCA, error) {
+	s.caMu.Lock()
+	defer s.caMu.Unlock()
+
 	if s.ca == nil {
 		ca, err := newLocalCA(now)
 		if err != nil {
@@ -82,21 +84,22 @@ func (s *MemoryStorage) caLocked(now time.Time) (*localCA, error) {
 	return s.ca, nil
 }
 
-// issueLocked generates the certificate, chain and private key of an issued
-// cert, signed by the storage's CA, and fills in the describe fields derived
-// from them. A certificate that is not issued is left as is. The caller must
-// hold s.mu for writing.
-func (s *MemoryStorage) issueLocked(cert *Certificate, now time.Time) error {
+// issue generates the certificate, chain and private key of an issued cert,
+// signed by the storage's CA, and fills in the describe fields derived from
+// them. A certificate that is not issued is left as is. cert must not be
+// stored yet, and the caller must not hold s.mu: generating a key takes long
+// enough to stall every operation waiting for the lock.
+func (s *MemoryStorage) issue(cert *Certificate, now time.Time) error {
 	if cert.Status != statusIssued {
 		return nil
 	}
 
-	ca, err := s.caLocked(now)
+	ca, err := s.issuingCA(now)
 	if err != nil {
 		return err
 	}
 
-	key, err := generateKey(cert.KeyAlgorithm)
+	key, err := s.newKey(cert.KeyAlgorithm)
 	if err != nil {
 		return err
 	}
