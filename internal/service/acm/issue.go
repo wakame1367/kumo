@@ -25,6 +25,17 @@ const localCAName = "kumo local CA"
 // issuedValidity is how long a certificate issued by kumo stays valid.
 const issuedValidity = 365 * 24 * time.Hour
 
+// signatureAlgorithmECDSAWithSHA256 is the SignatureAlgorithm of the
+// certificates kumo issues: the CA key is ECDSA P-256, which x509 signs with
+// SHA-256.
+const signatureAlgorithmECDSAWithSHA256 = "SHA256WITHECDSA"
+
+// PEM block types of the issued material.
+const (
+	pemTypeCertificate = "CERTIFICATE"
+	pemTypePrivateKey  = "PRIVATE KEY"
+)
+
 // localCA signs the certificates kumo issues. It lives only in memory: every
 // issued certificate stores its own chain, so a CA regenerated after a
 // restart does not invalidate certificates issued before it.
@@ -66,7 +77,7 @@ func newLocalCA(now time.Time) (*localCA, error) {
 		return nil, fmt.Errorf("failed to parse CA certificate: %w", err)
 	}
 
-	return &localCA{cert: cert, key: key, certPEM: encodePEM("CERTIFICATE", der)}, nil
+	return &localCA{cert: cert, key: key, certPEM: encodePEM(pemTypeCertificate, der)}, nil
 }
 
 // issuingCA returns the storage's CA, generating it on first use.
@@ -123,12 +134,12 @@ func (s *MemoryStorage) issue(cert *Certificate, now time.Time) error {
 		return fmt.Errorf("failed to marshal private key: %w", err)
 	}
 
-	cert.CertificateBody = encodePEM("CERTIFICATE", der)
+	cert.CertificateBody = encodePEM(pemTypeCertificate, der)
 	cert.CertificateChain = ca.certPEM
-	cert.PrivateKey = encodePEM("PRIVATE KEY", keyDER)
+	cert.PrivateKey = encodePEM(pemTypePrivateKey, keyDER)
 	cert.Serial = hex.EncodeToString(serial.Bytes())
 	cert.Issuer = localCAName
-	cert.SignatureAlgorithm = "SHA256WITHECDSA"
+	cert.SignatureAlgorithm = signatureAlgorithmECDSAWithSHA256
 	cert.NotBefore = &template.NotBefore
 	cert.NotAfter = &template.NotAfter
 

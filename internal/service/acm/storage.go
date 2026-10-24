@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -46,9 +47,23 @@ const (
 // accountID is the AWS account ID kumo reports for every certificate.
 const accountID = "000000000000"
 
-// certificateTypeImported is the CertificateType value for a certificate
-// imported via ImportCertificate, as opposed to one issued by ACM itself.
-const certificateTypeImported = "IMPORTED"
+// defaultRegion is the region of certificate ARNs when AWS_DEFAULT_REGION
+// is not set.
+const defaultRegion = "us-east-1"
+
+// CertificateType values: a certificate imported via ImportCertificate, or
+// one issued by ACM itself.
+const (
+	certificateTypeImported     = "IMPORTED"
+	certificateTypeAmazonIssued = "AMAZON_ISSUED"
+)
+
+// renewalIneligible is the RenewalEligibility of every certificate, since
+// kumo does not renew certificates.
+const renewalIneligible = "INELIGIBLE"
+
+// resourceRecordTypeCNAME is the type of DNS validation records.
+const resourceRecordTypeCNAME = "CNAME"
 
 // Storage defines the interface for ACM storage operations.
 type Storage interface {
@@ -84,6 +99,7 @@ type MemoryStorage struct {
 	mu           sync.RWMutex            `json:"-"`
 	Certificates map[string]*Certificate `json:"certificates"`
 	dataDir      string
+	region       string
 	// caMu guards ca. Certificates are issued without holding mu, so the CA
 	// has a lock of its own.
 	caMu sync.Mutex
@@ -93,10 +109,17 @@ type MemoryStorage struct {
 	newKey func(keyAlgorithm string) (crypto.Signer, error)
 }
 
-// NewMemoryStorage creates a new in-memory storage.
+// NewMemoryStorage creates a new in-memory storage. Certificate ARNs carry
+// the region from AWS_DEFAULT_REGION, or defaultRegion when it is not set.
 func NewMemoryStorage(opts ...Option) *MemoryStorage {
+	region := os.Getenv("AWS_DEFAULT_REGION")
+	if region == "" {
+		region = defaultRegion
+	}
+
 	s := &MemoryStorage{
 		Certificates: make(map[string]*Certificate),
+		region:       region,
 		newKey:       generateKey,
 	}
 	for _, o := range opts {
@@ -215,7 +238,7 @@ func validationRecord(domain string) *ResourceRecord {
 
 	return &ResourceRecord{
 		Name:  fmt.Sprintf("_%s.%s.", token("name"), base),
-		Type:  "CNAME",
+		Type:  resourceRecordTypeCNAME,
 		Value: fmt.Sprintf("_%s.acm-validations.aws.", token("value")),
 	}
 }
@@ -241,7 +264,7 @@ func (s *MemoryStorage) RequestCertificate(_ context.Context, req *RequestCertif
 		return nil, err
 	}
 
-	arn := newCertificateARN()
+	arn := s.newCertificateARN()
 
 	serialBytes := make([]byte, 16)
 	if _, err := rand.Read(serialBytes); err != nil {
@@ -261,14 +284,14 @@ func (s *MemoryStorage) RequestCertificate(_ context.Context, req *RequestCertif
 		DomainName:              req.DomainName,
 		SubjectAlternativeNames: req.SubjectAlternativeNames,
 		Status:                  status,
-		Type:                    "AMAZON_ISSUED",
+		Type:                    certificateTypeAmazonIssued,
 		KeyAlgorithm:            keyAlgorithm,
 		Serial:                  hex.EncodeToString(serialBytes),
 		Subject:                 fmt.Sprintf("CN=%s", req.DomainName),
 		CreatedAt:               now,
 		IssuedAt:                issuedAt,
 		DomainValidationOptions: buildDomainValidations(req, validationMethod),
-		RenewalEligibility:      "INELIGIBLE",
+		RenewalEligibility:      renewalIneligible,
 		Options:                 req.Options,
 		Tags:                    slices.Clone(req.Tags),
 	}
@@ -287,9 +310,10 @@ func (s *MemoryStorage) RequestCertificate(_ context.Context, req *RequestCertif
 	return cert, nil
 }
 
-// newCertificateARN generates the ARN of a new certificate.
-func newCertificateARN() string {
-	return fmt.Sprintf("arn:aws:acm:us-east-1:%s:certificate/%s", accountID, uuid.New().String())
+// newCertificateARN generates the ARN of a new certificate in the storage's
+// region.
+func (s *MemoryStorage) newCertificateARN() string {
+	return fmt.Sprintf("arn:aws:acm:%s:%s:certificate/%s", s.region, accountID, uuid.New().String())
 }
 
 // initialStatus returns the status and issue time of a newly requested
@@ -418,7 +442,7 @@ func (s *MemoryStorage) ImportCertificate(_ context.Context, req *ImportCertific
 
 	arn := req.CertificateArn
 	if arn == "" {
-		arn = newCertificateARN()
+		arn = s.newCertificateARN()
 	}
 
 	serialBytes := make([]byte, 16)
@@ -435,9 +459,9 @@ func (s *MemoryStorage) ImportCertificate(_ context.Context, req *ImportCertific
 	cert := &Certificate{
 		CertificateArn:     arn,
 		DomainName:         domainName,
-		Status:             "ISSUED",
+		Status:             statusIssued,
 		Type:               certificateTypeImported,
-		KeyAlgorithm:       "RSA_2048",
+		KeyAlgorithm:       keyAlgorithmRSA2048,
 		Serial:             serial,
 		Subject:            fmt.Sprintf("CN=%s", domainName),
 		CreatedAt:          now,
@@ -446,7 +470,7 @@ func (s *MemoryStorage) ImportCertificate(_ context.Context, req *ImportCertific
 		CertificateBody:    string(req.Certificate),
 		CertificateChain:   string(req.CertificateChain),
 		PrivateKey:         string(req.PrivateKey),
-		RenewalEligibility: "INELIGIBLE",
+		RenewalEligibility: renewalIneligible,
 		InUseBy:            []string{},
 		Tags:               slices.Clone(req.Tags),
 	}

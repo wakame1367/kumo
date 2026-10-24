@@ -19,7 +19,7 @@ func parsePEMCertificate(t *testing.T, data string) *x509.Certificate {
 	t.Helper()
 
 	block, rest := pem.Decode([]byte(data))
-	if block == nil || block.Type != "CERTIFICATE" {
+	if block == nil || block.Type != pemTypeCertificate {
 		t.Fatalf("no CERTIFICATE PEM block in %q", data)
 	}
 
@@ -120,7 +120,7 @@ func TestGetCertificate_ECKeyAlgorithm(t *testing.T) {
 
 	requested, err := store.RequestCertificate(ctx, &RequestCertificateInput{
 		DomainName:   "ec.example.com",
-		KeyAlgorithm: "EC_prime256v1",
+		KeyAlgorithm: keyAlgorithmECPrime256v1,
 	})
 	if err != nil {
 		t.Fatalf("RequestCertificate: %v", err)
@@ -144,7 +144,7 @@ func TestGetCertificate_PendingValidation(t *testing.T) {
 
 	requested, err := store.RequestCertificate(ctx, &RequestCertificateInput{
 		DomainName:       "pending.example.com",
-		ValidationMethod: "EMAIL",
+		ValidationMethod: validationEmail,
 	})
 	if err != nil {
 		t.Fatalf("RequestCertificate: %v", err)
@@ -199,7 +199,7 @@ func TestGetCertificate_IssuedWithoutMaterial(t *testing.T) {
 		CertificateArn: arn,
 		DomainName:     "no-material.example.com",
 		Status:         statusIssued,
-		Type:           "AMAZON_ISSUED",
+		Type:           certificateTypeAmazonIssued,
 	}
 
 	_, err := store.GetCertificate(t.Context(), arn)

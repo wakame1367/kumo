@@ -18,6 +18,7 @@ const (
 	tagValDev            = "dev"
 	tagValProd           = "prod"
 	tagValWeb            = "web"
+	validationEmail      = "EMAIL"
 )
 
 func requireCode(t *testing.T, err error, want string) {
@@ -30,6 +31,52 @@ func requireCode(t *testing.T, err error, want string) {
 
 	if acmErr.Code != want {
 		t.Fatalf("error code: got %s, want %s", acmErr.Code, want)
+	}
+}
+
+// TestNewMemoryStorage_RegionFromEnv checks that certificate ARNs carry the
+// region from AWS_DEFAULT_REGION, and us-east-1 when it is empty.
+func TestNewMemoryStorage_RegionFromEnv(t *testing.T) {
+	cases := []struct {
+		name       string
+		env        string
+		wantRegion string
+	}{
+		{"AWS_DEFAULT_REGION", "eu-west-1", "eu-west-1"},
+		{"empty falls back to us-east-1", "", "us-east-1"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("AWS_DEFAULT_REGION", tc.env)
+
+			store := NewMemoryStorage()
+			ctx := t.Context()
+
+			requested, err := store.RequestCertificate(ctx, &RequestCertificateInput{
+				DomainName:       "region.example.com",
+				ValidationMethod: validationEmail,
+			})
+			if err != nil {
+				t.Fatalf("RequestCertificate: %v", err)
+			}
+
+			imported, err := store.ImportCertificate(ctx, &ImportCertificateInput{
+				Certificate: []byte("cert"),
+				PrivateKey:  []byte("key"),
+			})
+			if err != nil {
+				t.Fatalf("ImportCertificate: %v", err)
+			}
+
+			wantPrefix := "arn:aws:acm:" + tc.wantRegion + ":" + accountID + ":certificate/"
+
+			for _, arn := range []string{requested.CertificateArn, imported.CertificateArn} {
+				if !strings.HasPrefix(arn, wantPrefix) {
+					t.Errorf("ARN %s, want prefix %s", arn, wantPrefix)
+				}
+			}
+		})
 	}
 }
 
@@ -46,7 +93,7 @@ func TestRequestCertificate_ValidationStatus(t *testing.T) {
 	}{
 		{"dns", "DNS", statusIssued, validationStatusSuccess, true, true},
 		{"default is dns", "", statusIssued, validationStatusSuccess, true, true},
-		{"email stays pending", "EMAIL", statusPendingValidation, statusPendingValidation, false, false},
+		{"email stays pending", validationEmail, statusPendingValidation, statusPendingValidation, false, false},
 	}
 
 	for _, tc := range cases {
