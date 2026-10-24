@@ -637,6 +637,8 @@ func edgeCacheConfig(behavior *DefaultCacheBehavior) (cache.DistributionConfig, 
 type upstreamTarget struct {
 	url     string
 	signing *originSigning
+	// client sends the request; nil means http.DefaultClient.
+	client *http.Client
 }
 
 // resolveUpstream picks the origin the matched behaviour points at, builds
@@ -931,7 +933,12 @@ func originRequest(target upstreamTarget, r *http.Request, reqBody io.Reader) (*
 		}
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	client := http.DefaultClient
+	if target.client != nil {
+		client = target.client
+	}
+
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("origin Do: %w", err)
 	}
