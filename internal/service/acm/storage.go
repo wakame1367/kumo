@@ -232,6 +232,11 @@ func (s *MemoryStorage) RequestCertificate(_ context.Context, req *RequestCertif
 		}
 	}
 
+	keyAlgorithm, err := requestKeyAlgorithm(req.KeyAlgorithm)
+	if err != nil {
+		return nil, err
+	}
+
 	if err := validateTags(req.Tags); err != nil {
 		return nil, err
 	}
@@ -241,11 +246,6 @@ func (s *MemoryStorage) RequestCertificate(_ context.Context, req *RequestCertif
 	serialBytes := make([]byte, 16)
 	if _, err := rand.Read(serialBytes); err != nil {
 		return nil, fmt.Errorf("failed to generate serial: %w", err)
-	}
-
-	keyAlgorithm := req.KeyAlgorithm
-	if keyAlgorithm == "" {
-		keyAlgorithm = "RSA_2048"
 	}
 
 	validationMethod := req.ValidationMethod

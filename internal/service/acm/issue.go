@@ -11,8 +11,10 @@ import (
 	"encoding/hex"
 	"encoding/pem"
 	"fmt"
+	"maps"
 	"math/big"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -159,29 +161,71 @@ func leafTemplate(cert *Certificate, key crypto.Signer, serial *big.Int, notBefo
 	}
 }
 
-// generateKey generates a private key for an ACM key algorithm, defaulting
-// to RSA 2048 like RequestCertificate.
+// Key algorithms that RequestCertificate issues certificates with, as
+// KeyAlgorithm values.
+const (
+	keyAlgorithmRSA2048      = "RSA_2048"
+	keyAlgorithmECPrime256v1 = "EC_prime256v1"
+	keyAlgorithmECSecp384r1  = "EC_secp384r1"
+)
+
+// keySpec describes the private key of a key algorithm: an RSA key of
+// rsaBits bits, or an ECDSA key on curve.
+type keySpec struct {
+	rsaBits int
+	curve   elliptic.Curve
+}
+
+// requestKeySpecs holds the key algorithms RequestCertificate issues
+// certificates with. KeyAlgorithm also takes RSA_1024, RSA_3072, RSA_4096
+// and EC_secp521r1, but the API reference supports only these three for a
+// certificate request: "Other listed algorithms are for imported
+// certificates only."
+// https://docs.aws.amazon.com/acm/latest/APIReference/API_RequestCertificate.html
+var requestKeySpecs = map[string]keySpec{
+	keyAlgorithmRSA2048:      {rsaBits: 2048},
+	keyAlgorithmECPrime256v1: {curve: elliptic.P256()},
+	keyAlgorithmECSecp384r1:  {curve: elliptic.P384()},
+}
+
+// requestKeyAlgorithm returns the key algorithm a requested certificate is
+// issued with: keyAlgorithm, or RSA_2048 when it is empty, the documented
+// default. Any other value, whether it is not a KeyAlgorithm value or is one
+// for imported certificates only, is rejected rather than issued with a key
+// that differs from the algorithm the certificate reports.
+func requestKeyAlgorithm(keyAlgorithm string) (string, error) {
+	if keyAlgorithm == "" {
+		return keyAlgorithmRSA2048, nil
+	}
+
+	if _, ok := requestKeySpecs[keyAlgorithm]; !ok {
+		return "", &Error{
+			Code: errInvalidParameter,
+			Message: fmt.Sprintf("KeyAlgorithm %q is not supported for a certificate request; supported values are %s",
+				keyAlgorithm, strings.Join(slices.Sorted(maps.Keys(requestKeySpecs)), ", ")),
+		}
+	}
+
+	return keyAlgorithm, nil
+}
+
+// generateKey generates a private key for a key algorithm in
+// requestKeySpecs.
 func generateKey(keyAlgorithm string) (crypto.Signer, error) {
+	spec, ok := requestKeySpecs[keyAlgorithm]
+	if !ok {
+		return nil, fmt.Errorf("unsupported key algorithm %q", keyAlgorithm)
+	}
+
 	var (
 		key crypto.Signer
 		err error
 	)
 
-	switch keyAlgorithm {
-	case "RSA_1024":
-		key, err = rsa.GenerateKey(rand.Reader, 1024) //nolint:gosec // requested key size
-	case "RSA_3072":
-		key, err = rsa.GenerateKey(rand.Reader, 3072)
-	case "RSA_4096":
-		key, err = rsa.GenerateKey(rand.Reader, 4096)
-	case "EC_prime256v1":
-		key, err = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	case "EC_secp384r1":
-		key, err = ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
-	case "EC_secp521r1":
-		key, err = ecdsa.GenerateKey(elliptic.P521(), rand.Reader)
-	default:
-		key, err = rsa.GenerateKey(rand.Reader, 2048)
+	if spec.curve != nil {
+		key, err = ecdsa.GenerateKey(spec.curve, rand.Reader)
+	} else {
+		key, err = rsa.GenerateKey(rand.Reader, spec.rsaBits)
 	}
 
 	if err != nil {

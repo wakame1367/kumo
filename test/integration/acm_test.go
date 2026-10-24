@@ -4,9 +4,12 @@ package integration
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"net/http"
 	"slices"
 	"testing"
@@ -16,6 +19,7 @@ import (
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/service/acm"
 	"github.com/aws/aws-sdk-go-v2/service/acm/types"
+	"github.com/aws/smithy-go"
 	"github.com/sivchari/golden"
 )
 
@@ -45,6 +49,48 @@ func requireACMError[E error](t *testing.T, err error) {
 
 	if got := respErr.HTTPStatusCode(); got != http.StatusBadRequest {
 		t.Errorf("HTTP status: got %d, want 400", got)
+	}
+}
+
+// acmError is the error code and HTTP status of a failed ACM call, recorded
+// in goldens.
+type acmError struct {
+	Code       string
+	HTTPStatus int
+}
+
+// acmErrorOf returns the code and HTTP status of err, which must be an ACM
+// API error.
+func acmErrorOf(t *testing.T, err error) *acmError {
+	t.Helper()
+
+	var apiErr smithy.APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("expected an API error, got %v", err)
+	}
+
+	var respErr *awshttp.ResponseError
+	if !errors.As(err, &respErr) {
+		t.Fatalf("no HTTP response in %v", err)
+	}
+
+	return &acmError{Code: apiErr.ErrorCode(), HTTPStatus: respErr.HTTPStatusCode()}
+}
+
+// describePublicKey names the algorithm and size of a certificate's public
+// key, such as "RSA 2048" or "ECDSA P-256".
+func describePublicKey(t *testing.T, key any) string {
+	t.Helper()
+
+	switch k := key.(type) {
+	case *rsa.PublicKey:
+		return fmt.Sprintf("RSA %d", k.N.BitLen())
+	case *ecdsa.PublicKey:
+		return "ECDSA " + k.Curve.Params().Name
+	default:
+		t.Fatalf("unexpected public key type %T", key)
+
+		return ""
 	}
 }
 
@@ -237,6 +283,82 @@ func TestACM_RequestCertificateWithOptions(t *testing.T) {
 	}
 
 	golden.New(t, golden.WithIgnoreFields("CertificateArn", "CreatedAt", "IssuedAt", "NotBefore", "NotAfter", "Serial", "ResultMetadata")).Assert(t.Name()+"_describe", describeOutput)
+}
+
+// TestACM_RequestCertificateKeyAlgorithms requests a certificate with each
+// KeyAlgorithm value, plus an empty and an undefined one, and records the
+// algorithm DescribeCertificate reports and the key of the certificate
+// GetCertificate returns, or the error.
+func TestACM_RequestCertificateKeyAlgorithms(t *testing.T) {
+	client := newACMClient(t)
+	ctx := t.Context()
+
+	type outcome struct {
+		KeyAlgorithm string
+		Described    string    `json:",omitempty"`
+		PublicKey    string    `json:",omitempty"`
+		Error        *acmError `json:",omitempty"`
+	}
+
+	algorithms := []types.KeyAlgorithm{
+		"", // the default
+		types.KeyAlgorithmRsa2048,
+		types.KeyAlgorithmEcPrime256v1,
+		types.KeyAlgorithmEcSecp384r1,
+		types.KeyAlgorithmRsa1024,
+		types.KeyAlgorithmRsa3072,
+		types.KeyAlgorithmRsa4096,
+		types.KeyAlgorithmEcSecp521r1,
+		"RSA_9999", // not a KeyAlgorithm value
+	}
+
+	outcomes := make([]outcome, 0, len(algorithms))
+
+	for _, algorithm := range algorithms {
+		requested, err := client.RequestCertificate(ctx, &acm.RequestCertificateInput{
+			DomainName:   aws.String("key-algorithm.example.com"),
+			KeyAlgorithm: algorithm,
+		})
+		if err != nil {
+			outcomes = append(outcomes, outcome{KeyAlgorithm: string(algorithm), Error: acmErrorOf(t, err)})
+
+			continue
+		}
+
+		t.Cleanup(func() {
+			_, _ = client.DeleteCertificate(context.Background(), &acm.DeleteCertificateInput{
+				CertificateArn: requested.CertificateArn,
+			})
+		})
+
+		described, err := client.DescribeCertificate(ctx, &acm.DescribeCertificateInput{CertificateArn: requested.CertificateArn})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		got, err := client.GetCertificate(ctx, &acm.GetCertificateInput{CertificateArn: requested.CertificateArn})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		block, _ := pem.Decode([]byte(aws.ToString(got.Certificate)))
+		if block == nil {
+			t.Fatalf("Certificate is not PEM: %q", aws.ToString(got.Certificate))
+		}
+
+		leaf, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			t.Fatalf("parse certificate: %v", err)
+		}
+
+		outcomes = append(outcomes, outcome{
+			KeyAlgorithm: string(algorithm),
+			Described:    string(described.Certificate.KeyAlgorithm),
+			PublicKey:    describePublicKey(t, leaf.PublicKey),
+		})
+	}
+
+	golden.New(t).Assert(t.Name(), outcomes)
 }
 
 func TestACM_DescribeNonExistentCertificate(t *testing.T) {
