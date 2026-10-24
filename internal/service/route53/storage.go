@@ -125,21 +125,7 @@ func (s *MemoryStorage) UnmarshalJSON(data []byte) error {
 		s.RecordSets = make(map[string][]ResourceRecordSet)
 	}
 
-	// Snapshots written before record names were normalized may hold names
-	// as sent, without the trailing dot or with upper-case letters, possibly
-	// for more than one spelling of a record.
-	for zoneID, records := range s.RecordSets {
-		for i := range records {
-			records[i].Name = normalizeDNSName(records[i].Name)
-		}
-
-		records = coalesceRecordSets(zoneID, records)
-		s.RecordSets[zoneID] = records
-
-		if zone, ok := s.HostedZones[zoneID]; ok {
-			zone.ResourceRecordSetCount = int64(len(records))
-		}
-	}
+	s.normalizeLoadedRecordSets(slog.Default())
 
 	if s.Changes == nil {
 		s.Changes = make(map[string]*ChangeInfo)
@@ -152,10 +138,48 @@ func (s *MemoryStorage) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// coalesceRecordSets keeps one record set per name, type and set identifier,
-// keeping the last occurrence since CREATE appends. Dropping a record set
-// that differs from the kept one is logged.
-func coalesceRecordSets(zoneID string, records []ResourceRecordSet) []ResourceRecordSet {
+// normalizeLoadedRecordSets brings the record sets loaded from a snapshot in
+// line with what ChangeRecordSets stores. Loading never fails, so record sets
+// that cannot be kept are dropped and logged.
+func (s *MemoryStorage) normalizeLoadedRecordSets(logger *slog.Logger) {
+	for zoneID, records := range s.RecordSets {
+		zone, ok := s.HostedZones[zoneID]
+		if !ok {
+			// Every record set operation looks the zone up first, and a new
+			// zone gets a freshly generated ID, so no API reaches the record
+			// sets of a zone that is gone. Drop them instead of saving them
+			// again, and log them so they can be restored by hand.
+			logger.Warn("route53: dropped record sets of a missing hosted zone from snapshot",
+				"zone", zoneID, "recordSets", snapshotJSON(records))
+			delete(s.RecordSets, zoneID)
+
+			continue
+		}
+
+		// Snapshots written before record names were normalized may hold
+		// names as sent, without the trailing dot or with upper-case letters,
+		// possibly for more than one spelling of a record set.
+		for i := range records {
+			records[i].Name = normalizeDNSName(records[i].Name)
+		}
+
+		records = coalesceRecordSets(logger, zoneID, records)
+		s.RecordSets[zoneID] = records
+		zone.ResourceRecordSetCount = int64(len(records))
+	}
+}
+
+// coalesceRecordSets keeps one record set per name, type and set identifier.
+// Earlier versions compared names exactly as sent, so a snapshot can hold
+// more than one spelling of a record set, which share a key once normalized.
+//
+// The snapshot does not say which spelling was written last. The one later in
+// the slice is kept: CREATE, and an UPSERT that matched no stored spelling,
+// append, so it is the later write unless an UPSERT afterwards updated an
+// earlier spelling in place. That case cannot be told apart, so a dropped
+// record set that differs from the kept one is logged in full, next to the
+// kept one, to be restored by hand if needed.
+func coalesceRecordSets(logger *slog.Logger, zoneID string, records []ResourceRecordSet) []ResourceRecordSet {
 	type recordKey struct{ name, recordType, setIdentifier string }
 
 	kept := make(map[recordKey]int, len(records))
@@ -166,8 +190,8 @@ func coalesceRecordSets(zoneID string, records []ResourceRecordSet) []ResourceRe
 
 		if j, ok := kept[key]; ok {
 			if !reflect.DeepEqual(records[i], records[j]) {
-				slog.Warn("route53: dropped an earlier conflicting record set from snapshot",
-					"zone", zoneID, "name", key.name, "type", key.recordType)
+				logger.Warn("route53: dropped an earlier conflicting record set from snapshot",
+					"zone", zoneID, "dropped", snapshotJSON(records[i]), "kept", snapshotJSON(records[j]))
 			}
 
 			continue
@@ -186,6 +210,17 @@ func coalesceRecordSets(zoneID string, records []ResourceRecordSet) []ResourceRe
 	}
 
 	return coalesced
+}
+
+// snapshotJSON renders v the way a snapshot stores it, so that a logged record
+// set can be put back into the snapshot.
+func snapshotJSON(v any) string {
+	data, err := json.Marshal(v)
+	if err != nil {
+		return fmt.Sprintf("%+v", v)
+	}
+
+	return string(data)
 }
 
 // saveLocked persists the current state to disk while the caller holds the lock.

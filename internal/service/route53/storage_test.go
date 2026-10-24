@@ -1,15 +1,21 @@
 package route53
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
+	"strings"
 	"testing"
 )
 
 const (
 	testZoneID        = "/hostedzone/test"
+	testZoneName      = "example.com."
 	testActionDelete  = "DELETE"
 	testActionUpsert  = "UPSERT"
 	testCreatedRecord = "www.example.com. 192.0.2.1"
@@ -96,7 +102,7 @@ func TestChangeRecordSetsNormalizesRecordNames(t *testing.T) {
 			t.Parallel()
 
 			s := NewMemoryStorage()
-			if err := s.CreateHostedZone(&HostedZone{ID: testZoneID, Name: "example.com."}); err != nil {
+			if err := s.CreateHostedZone(&HostedZone{ID: testZoneID, Name: testZoneName}); err != nil {
 				t.Fatal(err)
 			}
 
@@ -130,8 +136,16 @@ func loadSnapshot(t *testing.T, records []ResourceRecordSet) *MemoryStorage {
 	t.Helper()
 
 	legacy := NewMemoryStorage()
-	legacy.HostedZones[testZoneID] = &HostedZone{ID: testZoneID, Name: "example.com.", ResourceRecordSetCount: int64(len(records))}
+	legacy.HostedZones[testZoneID] = &HostedZone{ID: testZoneID, Name: testZoneName, ResourceRecordSetCount: int64(len(records))}
 	legacy.RecordSets[testZoneID] = records
+
+	return writeAndLoad(t, legacy)
+}
+
+// writeAndLoad writes the state of legacy as a snapshot and loads it into a
+// new MemoryStorage.
+func writeAndLoad(t *testing.T, legacy *MemoryStorage) *MemoryStorage {
+	t.Helper()
 
 	data, err := legacy.MarshalJSON()
 	if err != nil {
@@ -235,5 +249,65 @@ func TestLoadNormalizesPersistedRecordNames(t *testing.T) {
 				t.Fatalf("records after DELETE = %q, want %q", got, tt.wantAfterDelete)
 			}
 		})
+	}
+}
+
+func TestLoadDropsRecordSetsOfMissingZone(t *testing.T) {
+	t.Parallel()
+
+	const missingZoneID = "/hostedzone/missing"
+
+	legacy := NewMemoryStorage()
+	legacy.HostedZones[testZoneID] = &HostedZone{ID: testZoneID, Name: testZoneName, ResourceRecordSetCount: 1}
+	legacy.RecordSets[testZoneID] = []ResourceRecordSet{newTestRecordSet("www.example.com.", "192.0.2.1")}
+	legacy.RecordSets[missingZoneID] = []ResourceRecordSet{newTestRecordSet("www.missing.example.", "192.0.2.2")}
+
+	s := writeAndLoad(t, legacy)
+
+	if _, ok := s.RecordSets[missingZoneID]; ok {
+		t.Fatalf("record sets of %s were kept after load", missingZoneID)
+	}
+
+	if got, want := recordSummaries(t, s), []string{testCreatedRecord}; !slices.Equal(got, want) {
+		t.Fatalf("records after load = %q, want %q", got, want)
+	}
+}
+
+func TestCoalesceRecordSetsLogsDroppedRecordSet(t *testing.T) {
+	t.Parallel()
+
+	var logs bytes.Buffer
+
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	dropped := newTestRecordSet("www.example.com.", "192.0.2.1")
+	kept := newTestRecordSet("www.example.com.", "192.0.2.9")
+
+	got := coalesceRecordSets(logger, testZoneID, []ResourceRecordSet{dropped, kept, kept})
+	if !reflect.DeepEqual(got, []ResourceRecordSet{kept}) {
+		t.Fatalf("coalesced = %+v, want only the later record set", got)
+	}
+
+	// The identical copy of the kept record set is dropped without a log; the
+	// differing earlier one is logged in a form that restores it.
+	lines := strings.Split(strings.TrimSpace(logs.String()), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("logged %d lines, want 1:\n%s", len(lines), logs.String())
+	}
+
+	var entry struct {
+		Dropped string `json:"dropped"`
+	}
+
+	if err := json.Unmarshal([]byte(lines[0]), &entry); err != nil {
+		t.Fatal(err)
+	}
+
+	var restored ResourceRecordSet
+	if err := json.Unmarshal([]byte(entry.Dropped), &restored); err != nil {
+		t.Fatalf("logged record set %q: %v", entry.Dropped, err)
+	}
+
+	if !reflect.DeepEqual(restored, dropped) {
+		t.Fatalf("logged record set = %+v, want %+v", restored, dropped)
 	}
 }
