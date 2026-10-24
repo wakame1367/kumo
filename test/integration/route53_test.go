@@ -630,6 +630,46 @@ func TestRoute53_ChangeResourceRecordSets_EmptyName(t *testing.T) {
 	assertZoneGolden(t, t.Name()+"_list", zoneName, listRecordSets(t, client, zoneID))
 }
 
+func TestRoute53_ChangeBatchIsAtomic(t *testing.T) {
+	t.Parallel()
+
+	client := newRoute53Client(t)
+	ctx := t.Context()
+	zoneID, zoneName := createRecordTestZone(t, client, "atomic-test")
+	www := "www." + zoneName + "."
+	api := "api." + zoneName + "."
+
+	if err := changeRecordSets(ctx, client, zoneID,
+		aRecordChange(types.ChangeActionCreate, www, 300, "192.0.2.1"),
+		aRecordChange(types.ChangeActionCreate, api, 300, "192.0.2.10"),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	// Each batch fails on its last change, a duplicate CREATE, after a DELETE
+	// or UPSERT that would succeed on its own. Neither may change the zone.
+	duplicate := aRecordChange(types.ChangeActionCreate, api, 300, "192.0.2.10")
+
+	for _, first := range []types.Change{
+		aRecordChange(types.ChangeActionDelete, www, 300, "192.0.2.1"),
+		aRecordChange(types.ChangeActionUpsert, www, 600, "192.0.2.2"),
+	} {
+		var apiErr smithy.APIError
+		if err := changeRecordSets(ctx, client, zoneID, first, duplicate); !errors.As(err, &apiErr) {
+			t.Fatalf("%s then duplicate CREATE: expected an API error, got %T: %v", first.Action, err, err)
+		}
+	}
+
+	assertZoneGolden(t, t.Name()+"_records", zoneName, listRecordSets(t, client, zoneID))
+
+	zone, err := client.GetHostedZone(ctx, &route53.GetHostedZoneInput{Id: aws.String(zoneID)})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assertZoneGolden(t, t.Name()+"_zone", zoneName, zone)
+}
+
 func TestRoute53_ListHostedZones_Pagination(t *testing.T) {
 	// Not parallel: pagination assertions require a stable view of the
 	// hosted zones list, which other parallel tests mutate.
