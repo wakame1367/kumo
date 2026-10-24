@@ -498,3 +498,39 @@ func TestLoadedWeightedRecordSetsStayDistinct(t *testing.T) {
 		t.Fatalf("records after changes = %q, want %q", got, want)
 	}
 }
+
+func TestChangeRecordSetsChecksRoutingPoliciesOfWrittenNamesOnly(t *testing.T) {
+	t.Parallel()
+
+	s := NewMemoryStorage()
+	if err := s.CreateHostedZone(&HostedZone{ID: testZoneID, Name: testZoneName}); err != nil {
+		t.Fatal(err)
+	}
+
+	// A snapshot from an earlier version can already mix a simple and a
+	// weighted record set under one name and type.
+	s.RecordSets[testZoneID] = []ResourceRecordSet{
+		newTestRecordSet("www.example.com.", "192.0.2.1"),
+		newWeightedRecordSet("blue", "192.0.2.2", 10),
+	}
+
+	steps := []struct {
+		change  Change
+		wantErr error
+	}{
+		// A change to another name is not refused for the mix,
+		{Change{Action: testActionCreate, ResourceRecordSet: newTestRecordSet("api.example.com.", "192.0.2.10")}, nil},
+		// a write to the mixed name and type is,
+		{Change{Action: testActionUpsert, ResourceRecordSet: newWeightedRecordSet("green", "192.0.2.3", 90)}, ErrRoutingPolicyConflict},
+		// and a DELETE that ends the mix is not.
+		{Change{Action: testActionDelete, ResourceRecordSet: newTestRecordSet("www.example.com.", "192.0.2.1")}, nil},
+		{Change{Action: testActionUpsert, ResourceRecordSet: newWeightedRecordSet("green", "192.0.2.3", 90)}, nil},
+	}
+
+	for _, step := range steps {
+		rrset := step.change.ResourceRecordSet
+		if err := s.ChangeRecordSets(testZoneID, []Change{step.change}); !errors.Is(err, step.wantErr) {
+			t.Fatalf("%s %s %q: error = %v, want %v", step.change.Action, rrset.Name, rrset.SetIdentifier, err, step.wantErr)
+		}
+	}
+}

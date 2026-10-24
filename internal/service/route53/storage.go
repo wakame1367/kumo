@@ -26,6 +26,9 @@ var (
 	ErrRecordSetAlreadyExists = errors.New("record set already exists")
 	// ErrInvalidInput is returned when input is invalid.
 	ErrInvalidInput = errors.New("invalid input")
+	// ErrRoutingPolicyConflict is returned when record sets that share a name
+	// and type would use routing policies that can't be mixed.
+	ErrRoutingPolicyConflict = errors.New("record sets with the same name and type use conflicting routing policies")
 	// ErrChangeNotFound is returned when a change is not found.
 	ErrChangeNotFound = errors.New("change not found")
 )
@@ -403,6 +406,10 @@ func (s *MemoryStorage) ChangeRecordSets(hostedZoneID string, changes []Change) 
 		}
 	}
 
+	if err := checkRoutingPolicies(records, changes); err != nil {
+		return err
+	}
+
 	s.RecordSets[hostedZoneID] = records
 
 	if zone, exists := s.HostedZones[hostedZoneID]; exists {
@@ -438,6 +445,62 @@ func (s *MemoryStorage) GetChange(id string) (*ChangeInfo, error) {
 	}
 
 	return c, nil
+}
+
+// exclusiveRoutingPolicy returns the routing policy of rrset if it is one that,
+// per the Route 53 documentation, no record set of another routing policy may
+// share a name and type with, and "" otherwise. Of those policies kumo only
+// keeps the fields of weighted, latency and failover record sets; geolocation
+// and geoproximity record sets look like any other record set with a
+// SetIdentifier.
+func exclusiveRoutingPolicy(rrset *ResourceRecordSet) string {
+	switch {
+	case rrset.Weight != nil:
+		return "weighted"
+	case rrset.Region != "":
+		return "latency"
+	case rrset.Failover != "":
+		return "failover"
+	default:
+		return ""
+	}
+}
+
+// checkRoutingPolicies returns ErrRoutingPolicyConflict if a name and type
+// that a CREATE or UPSERT in changes writes holds, in records, a weighted,
+// latency or failover record set next to a record set of another routing
+// policy. Only the names and types the batch writes are checked, so a batch is
+// not refused for a conflict it neither causes nor touches.
+func checkRoutingPolicies(records []ResourceRecordSet, changes []Change) error {
+	type group struct{ name, recordType string }
+
+	written := make(map[group]bool, len(changes))
+
+	for i := range changes {
+		if changes[i].Action == "CREATE" || changes[i].Action == "UPSERT" {
+			rrset := &changes[i].ResourceRecordSet
+			written[group{normalizeDNSName(rrset.Name), rrset.Type}] = true
+		}
+	}
+
+	policies := make(map[group]string, len(written))
+
+	for i := range records {
+		key := group{records[i].Name, records[i].Type}
+		if !written[key] {
+			continue
+		}
+
+		policy := exclusiveRoutingPolicy(&records[i])
+
+		if seen, ok := policies[key]; ok && seen != policy {
+			return ErrRoutingPolicyConflict
+		}
+
+		policies[key] = policy
+	}
+
+	return nil
 }
 
 // findRecordIndex finds the index of a record set by name, type and set

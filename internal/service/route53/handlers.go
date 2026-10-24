@@ -366,6 +366,7 @@ var changeRecordSetsErrors = []struct {
 	{ErrHostedZoneNotFound, http.StatusNotFound, "NoSuchHostedZone", "Hosted zone not found"},
 	{ErrRecordSetAlreadyExists, http.StatusBadRequest, "ResourceRecordAlreadyExists", "Resource record already exists"},
 	{ErrRecordSetNotFound, http.StatusBadRequest, "InvalidChangeBatch", "Resource record not found"},
+	{ErrRoutingPolicyConflict, http.StatusBadRequest, "InvalidChangeBatch", "A weighted, latency or failover record set can't share its name and type with a record set of another routing policy"},
 	{ErrInvalidInput, http.StatusBadRequest, "InvalidInput", "Invalid change action"},
 }
 

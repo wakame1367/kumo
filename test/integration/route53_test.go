@@ -708,6 +708,59 @@ func TestRoute53_WeightedRecordSets(t *testing.T) {
 	assertZoneGolden(t, t.Name()+"_change", zoneName, listRecordSets(t, client, zoneID))
 }
 
+func TestRoute53_RoutingPolicyConflict(t *testing.T) {
+	t.Parallel()
+
+	client := newRoute53Client(t)
+	ctx := t.Context()
+	zoneID, zoneName := createRecordTestZone(t, client, "routing-test")
+	www := "www." + zoneName + "."
+
+	identified := func(action types.ChangeAction, setIdentifier, value string, policy func(*types.ResourceRecordSet)) types.Change {
+		change := aRecordChange(action, www, 60, value)
+		change.ResourceRecordSet.SetIdentifier = aws.String(setIdentifier)
+		policy(change.ResourceRecordSet)
+
+		return change
+	}
+	weighted := func(setIdentifier, value string, weight int64) types.Change {
+		return identified(types.ChangeActionCreate, setIdentifier, value, func(rrset *types.ResourceRecordSet) {
+			rrset.Weight = aws.Int64(weight)
+		})
+	}
+	latency := identified(types.ChangeActionCreate, "east", "192.0.2.3", func(rrset *types.ResourceRecordSet) {
+		rrset.Region = types.ResourceRecordSetRegionUsEast1
+	})
+	failover := identified(types.ChangeActionCreate, "primary", "192.0.2.4", func(rrset *types.ResourceRecordSet) {
+		rrset.Failover = types.ResourceRecordSetFailoverPrimary
+	})
+
+	// A simple record set can't share its name and type with a latency or a
+	// weighted record set.
+	if err := changeRecordSets(ctx, client, zoneID, aRecordChange(types.ChangeActionCreate, www, 60, "192.0.2.1")); err != nil {
+		t.Fatal(err)
+	}
+
+	assertAPIErrorCode(t, changeRecordSets(ctx, client, zoneID, latency), "InvalidChangeBatch")
+	assertAPIErrorCode(t, changeRecordSets(ctx, client, zoneID, weighted("blue", "192.0.2.1", 10)), "InvalidChangeBatch")
+	assertZoneGolden(t, t.Name()+"_simple", zoneName, listRecordSets(t, client, zoneID))
+
+	// The check applies to the state the whole batch leaves, so one batch can
+	// replace the simple record set with weighted ones.
+	if err := changeRecordSets(ctx, client, zoneID,
+		aRecordChange(types.ChangeActionDelete, www, 60, "192.0.2.1"),
+		weighted("blue", "192.0.2.1", 10),
+		weighted("green", "192.0.2.2", 90),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	// Neither a simple nor a failover record set can join the weighted ones.
+	assertAPIErrorCode(t, changeRecordSets(ctx, client, zoneID, aRecordChange(types.ChangeActionUpsert, www, 60, "192.0.2.1")), "InvalidChangeBatch")
+	assertAPIErrorCode(t, changeRecordSets(ctx, client, zoneID, failover), "InvalidChangeBatch")
+	assertZoneGolden(t, t.Name()+"_weighted", zoneName, listRecordSets(t, client, zoneID))
+}
+
 func TestRoute53_ListHostedZones_Pagination(t *testing.T) {
 	// Not parallel: pagination assertions require a stable view of the
 	// hosted zones list, which other parallel tests mutate.
