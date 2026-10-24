@@ -356,20 +356,20 @@ func (s *MemoryStorage) ChangeRecordSets(hostedZoneID string, changes []Change) 
 
 		switch changes[i].Action {
 		case "CREATE":
-			if s.findRecordIndex(records, rrset.Name, rrset.Type) >= 0 {
+			if s.findRecordIndex(records, rrset.Name, rrset.Type, rrset.SetIdentifier) >= 0 {
 				return ErrRecordSetAlreadyExists
 			}
 
 			records = append(records, rrset)
 		case "DELETE":
-			idx := s.findRecordIndex(records, rrset.Name, rrset.Type)
+			idx := s.findRecordIndex(records, rrset.Name, rrset.Type, rrset.SetIdentifier)
 			if idx < 0 {
 				return ErrRecordSetNotFound
 			}
 
 			records = append(records[:idx], records[idx+1:]...)
 		case "UPSERT":
-			idx := s.findRecordIndex(records, rrset.Name, rrset.Type)
+			idx := s.findRecordIndex(records, rrset.Name, rrset.Type, rrset.SetIdentifier)
 			if idx >= 0 {
 				records[idx] = rrset
 			} else {
@@ -417,10 +417,13 @@ func (s *MemoryStorage) GetChange(id string) (*ChangeInfo, error) {
 	return c, nil
 }
 
-// findRecordIndex finds the index of a record set by name and type.
-func (s *MemoryStorage) findRecordIndex(records []ResourceRecordSet, name, recordType string) int {
+// findRecordIndex finds the index of a record set by name, type and set
+// identifier, the same key coalesceRecordSets uses. Record sets with a routing
+// policy other than simple share a name and type and differ only in
+// SetIdentifier.
+func (s *MemoryStorage) findRecordIndex(records []ResourceRecordSet, name, recordType, setIdentifier string) int {
 	for i := range records {
-		if records[i].Name == name && records[i].Type == recordType {
+		if records[i].Name == name && records[i].Type == recordType && records[i].SetIdentifier == setIdentifier {
 			return i
 		}
 	}

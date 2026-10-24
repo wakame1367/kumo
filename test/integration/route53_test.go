@@ -670,6 +670,44 @@ func TestRoute53_ChangeBatchIsAtomic(t *testing.T) {
 	assertZoneGolden(t, t.Name()+"_zone", zoneName, zone)
 }
 
+func TestRoute53_WeightedRecordSets(t *testing.T) {
+	t.Parallel()
+
+	client := newRoute53Client(t)
+	ctx := t.Context()
+	zoneID, zoneName := createRecordTestZone(t, client, "weighted-test")
+	www := "www." + zoneName + "."
+
+	weighted := func(action types.ChangeAction, setIdentifier, value string, weight int64) types.Change {
+		change := aRecordChange(action, www, 60, value)
+		change.ResourceRecordSet.SetIdentifier = aws.String(setIdentifier)
+		change.ResourceRecordSet.Weight = aws.Int64(weight)
+
+		return change
+	}
+
+	// Record sets that share a name and type but not a SetIdentifier are
+	// distinct.
+	if err := changeRecordSets(ctx, client, zoneID,
+		weighted(types.ChangeActionCreate, "blue", "192.0.2.1", 10),
+		weighted(types.ChangeActionCreate, "green", "192.0.2.2", 90),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	assertZoneGolden(t, t.Name()+"_create", zoneName, listRecordSets(t, client, zoneID))
+
+	// UPSERT and DELETE act only on the record set with their SetIdentifier.
+	if err := changeRecordSets(ctx, client, zoneID,
+		weighted(types.ChangeActionUpsert, "green", "192.0.2.3", 80),
+		weighted(types.ChangeActionDelete, "blue", "192.0.2.1", 10),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	assertZoneGolden(t, t.Name()+"_change", zoneName, listRecordSets(t, client, zoneID))
+}
+
 func TestRoute53_ListHostedZones_Pagination(t *testing.T) {
 	// Not parallel: pagination assertions require a stable view of the
 	// hosted zones list, which other parallel tests mutate.

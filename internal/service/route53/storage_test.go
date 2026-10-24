@@ -16,10 +16,13 @@ import (
 const (
 	testZoneID        = "/hostedzone/test"
 	testZoneName      = "example.com."
+	testActionCreate  = "CREATE"
 	testActionDelete  = "DELETE"
 	testActionUpsert  = "UPSERT"
 	testCreatedRecord = "www.example.com. 192.0.2.1"
 	testUpdatedRecord = "www.example.com. 192.0.2.2"
+	testBlueRecord    = "blue 192.0.2.1"
+	testGreenRecord   = "green 192.0.2.2"
 )
 
 func newTestRecordSet(name, value string) ResourceRecordSet {
@@ -106,7 +109,7 @@ func TestChangeRecordSetsNormalizesRecordNames(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			create := Change{Action: "CREATE", ResourceRecordSet: newTestRecordSet(tt.createName, "192.0.2.1")}
+			create := Change{Action: testActionCreate, ResourceRecordSet: newTestRecordSet(tt.createName, "192.0.2.1")}
 			if err := s.ChangeRecordSets(testZoneID, []Change{create}); err != nil {
 				t.Fatalf("CREATE: %v", err)
 			}
@@ -309,5 +312,123 @@ func TestCoalesceRecordSetsLogsDroppedRecordSet(t *testing.T) {
 
 	if !reflect.DeepEqual(restored, dropped) {
 		t.Fatalf("logged record set = %+v, want %+v", restored, dropped)
+	}
+}
+
+func newWeightedRecordSet(setIdentifier, value string, weight int64) ResourceRecordSet {
+	rrset := newTestRecordSet("www.example.com.", value)
+	rrset.SetIdentifier = setIdentifier
+	rrset.Weight = &weight
+
+	return rrset
+}
+
+// weightedSummaries returns "setIdentifier value" for every record set in the zone.
+func weightedSummaries(t *testing.T, s *MemoryStorage) []string {
+	t.Helper()
+
+	records, err := s.GetRecordSets(testZoneID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	summaries := make([]string, 0, len(records))
+	for i := range records {
+		summaries = append(summaries, records[i].SetIdentifier+" "+records[i].ResourceRecords[0].Value)
+	}
+
+	return summaries
+}
+
+var setIdentifierTests = []struct {
+	name   string
+	change Change
+	want   []string
+}{
+	{
+		name:   "upsert one leaves the other",
+		change: Change{Action: testActionUpsert, ResourceRecordSet: newWeightedRecordSet("blue", "192.0.2.3", 20)},
+		want:   []string{"blue 192.0.2.3", testGreenRecord},
+	},
+	{
+		name:   "upsert a new set identifier adds a record set",
+		change: Change{Action: testActionUpsert, ResourceRecordSet: newWeightedRecordSet("red", "192.0.2.4", 0)},
+		want:   []string{testBlueRecord, testGreenRecord, "red 192.0.2.4"},
+	},
+	{
+		name:   "delete one leaves the other",
+		change: Change{Action: testActionDelete, ResourceRecordSet: newWeightedRecordSet("blue", "192.0.2.1", 10)},
+		want:   []string{testGreenRecord},
+	},
+}
+
+func TestChangeRecordSetsDistinguishesSetIdentifier(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range setIdentifierTests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			s := NewMemoryStorage()
+			if err := s.CreateHostedZone(&HostedZone{ID: testZoneID, Name: testZoneName}); err != nil {
+				t.Fatal(err)
+			}
+
+			blue := Change{Action: testActionCreate, ResourceRecordSet: newWeightedRecordSet("blue", "192.0.2.1", 10)}
+			green := Change{Action: testActionCreate, ResourceRecordSet: newWeightedRecordSet("green", "192.0.2.2", 90)}
+
+			if err := s.ChangeRecordSets(testZoneID, []Change{blue}); err != nil {
+				t.Fatalf("CREATE blue: %v", err)
+			}
+
+			if err := s.ChangeRecordSets(testZoneID, []Change{green}); err != nil {
+				t.Fatalf("CREATE green: %v", err)
+			}
+
+			if got, want := weightedSummaries(t, s), []string{testBlueRecord, testGreenRecord}; !slices.Equal(got, want) {
+				t.Fatalf("records after CREATE = %q, want %q", got, want)
+			}
+
+			if err := s.ChangeRecordSets(testZoneID, []Change{green}); !errors.Is(err, ErrRecordSetAlreadyExists) {
+				t.Fatalf("duplicate CREATE error = %v, want %v", err, ErrRecordSetAlreadyExists)
+			}
+
+			if err := s.ChangeRecordSets(testZoneID, []Change{tt.change}); err != nil {
+				t.Fatalf("%s: %v", tt.change.Action, err)
+			}
+
+			if got := weightedSummaries(t, s); !slices.Equal(got, tt.want) {
+				t.Fatalf("records after %s = %q, want %q", tt.change.Action, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestLoadedWeightedRecordSetsStayDistinct(t *testing.T) {
+	t.Parallel()
+
+	// Loading keeps both record sets, since its key includes SetIdentifier,
+	// and ChangeRecordSets has to find each of them by that same key.
+	blue := newWeightedRecordSet("blue", "192.0.2.1", 10)
+	blue.Name = "WWW.example.com"
+	green := newWeightedRecordSet("green", "192.0.2.2", 90)
+
+	s := loadSnapshot(t, []ResourceRecordSet{blue, green})
+
+	if got, want := weightedSummaries(t, s), []string{testBlueRecord, testGreenRecord}; !slices.Equal(got, want) {
+		t.Fatalf("records after load = %q, want %q", got, want)
+	}
+
+	changes := []Change{
+		{Action: testActionUpsert, ResourceRecordSet: newWeightedRecordSet("green", "192.0.2.3", 80)},
+		{Action: testActionDelete, ResourceRecordSet: newWeightedRecordSet("blue", "192.0.2.1", 10)},
+		{Action: testActionCreate, ResourceRecordSet: newWeightedRecordSet("red", "192.0.2.4", 20)},
+	}
+	if err := s.ChangeRecordSets(testZoneID, changes); err != nil {
+		t.Fatalf("UPSERT green, DELETE blue, CREATE red: %v", err)
+	}
+
+	if got, want := weightedSummaries(t, s), []string{"green 192.0.2.3", "red 192.0.2.4"}; !slices.Equal(got, want) {
+		t.Fatalf("records after changes = %q, want %q", got, want)
 	}
 }
