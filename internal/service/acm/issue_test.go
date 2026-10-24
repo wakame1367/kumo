@@ -10,10 +10,29 @@ import (
 	"encoding/pem"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 )
+
+// opGetCertificate is the GetCertificate operation name.
+const opGetCertificate = "GetCertificate"
+
+// dispatch sends an ACM request with body to svc and returns the response.
+func dispatch(t *testing.T, svc *Service, operation, body string) *httptest.ResponseRecorder {
+	t.Helper()
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/", strings.NewReader(body))
+	req.Header.Set("X-Amz-Target", "CertificateManager."+operation)
+	req.Header.Set("Content-Type", "application/x-amz-json-1.1")
+
+	w := httptest.NewRecorder()
+	svc.DispatchAction(w, req)
+
+	return w
+}
 
 func parsePEMCertificate(t *testing.T, data string) *x509.Certificate {
 	t.Helper()

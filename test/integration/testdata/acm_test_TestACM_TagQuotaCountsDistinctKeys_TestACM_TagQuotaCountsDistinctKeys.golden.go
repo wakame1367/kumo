@@ -18,5 +18,9 @@
   {
     "Step": "overwrite a key at the quota",
     "Tags": 50
+  },
+  {
+    "Step": "add 50 keys in one call",
+    "Tags": 50
   }
 ]

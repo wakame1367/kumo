@@ -3,6 +3,7 @@
 package integration
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/rsa"
@@ -10,6 +11,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"slices"
 	"strings"
@@ -676,19 +678,22 @@ func TestACM_DuplicateTagKeys(t *testing.T) {
 
 // TestACM_TagQuotaCountsDistinctKeys requests a certificate with 50 tags
 // that hold 49 distinct keys, then adds keys up to the quota of 50 tags per
-// certificate, which counts distinct keys.
+// certificate, which counts distinct keys. It also adds 50 keys to another
+// certificate in one call.
 func TestACM_TagQuotaCountsDistinctKeys(t *testing.T) {
 	client := newACMClient(t)
 	ctx := t.Context()
 
-	tags := make([]types.Tag, 0, 50)
-	for i := range 49 {
-		tags = append(tags, acmTag(fmt.Sprintf("key-%02d", i), "v"))
+	keys := func(n int) []types.Tag {
+		tags := make([]types.Tag, 0, n)
+		for i := range n {
+			tags = append(tags, acmTag(fmt.Sprintf("key-%02d", i), "v"))
+		}
+
+		return tags
 	}
 
-	tags = append(tags, acmTag("key-00", "again"))
-
-	arn := requestACMCertificate(t, client, "tag-quota.example.com", tags...)
+	requested := requestACMCertificate(t, client, "tag-quota.example.com", append(keys(49), acmTag("key-00", "again"))...)
 
 	type step struct {
 		Step  string
@@ -698,7 +703,7 @@ func TestACM_TagQuotaCountsDistinctKeys(t *testing.T) {
 
 	var steps []step
 
-	record := func(name string, err error) {
+	record := func(name string, arn *string, err error) {
 		s := step{Step: name, Tags: len(listACMTags(t, client, arn).Tags)}
 		if err != nil {
 			s.Error = acmErrorOf(t, err)
@@ -707,19 +712,19 @@ func TestACM_TagQuotaCountsDistinctKeys(t *testing.T) {
 		steps = append(steps, s)
 	}
 
-	addTag := func(key, value string) error {
-		_, err := client.AddTagsToCertificate(ctx, &acm.AddTagsToCertificateInput{
-			CertificateArn: arn,
-			Tags:           []types.Tag{acmTag(key, value)},
-		})
+	addTags := func(arn *string, tags ...types.Tag) error {
+		_, err := client.AddTagsToCertificate(ctx, &acm.AddTagsToCertificateInput{CertificateArn: arn, Tags: tags})
 
 		return err
 	}
 
-	record("request 50 tags with 49 keys", nil)
-	record("add a 50th key", addTag("key-49", "v"))
-	record("add a 51st key", addTag("key-50", "v"))
-	record("overwrite a key at the quota", addTag("key-00", "overwritten"))
+	record("request 50 tags with 49 keys", requested, nil)
+	record("add a 50th key", requested, addTags(requested, acmTag("key-49", "v")))
+	record("add a 51st key", requested, addTags(requested, acmTag("key-50", "v")))
+	record("overwrite a key at the quota", requested, addTags(requested, acmTag("key-00", "overwritten")))
+
+	untagged := requestACMCertificate(t, client, "tag-quota-add.example.com")
+	record("add 50 keys in one call", untagged, addTags(untagged, keys(50)...))
 
 	golden.New(t).Assert(t.Name(), steps)
 }
@@ -806,6 +811,197 @@ func TestACM_InvalidTags(t *testing.T) {
 	record("AddTagsToCertificate reserved key", add(reservedKey))
 	record("RemoveTagsFromCertificate reserved key", remove(types.Tag{Key: aws.String("aws:reserved")}))
 	record("RequestCertificate 51 tags", request(tooMany...))
+
+	golden.New(t).Assert(t.Name(), outcomes)
+}
+
+// TestACM_RemoveTagsMatchesValue removes tags given with and without a
+// value: one given with a value is removed only when the value matches, and
+// one given without a value is removed whatever its value.
+func TestACM_RemoveTagsMatchesValue(t *testing.T) {
+	client := newACMClient(t)
+
+	arn := requestACMCertificate(t, client, "remove-tags.example.com",
+		acmTag("env", "prod"), acmTag("team", "web"), acmTag("owner", "alice"))
+
+	if _, err := client.RemoveTagsFromCertificate(t.Context(), &acm.RemoveTagsFromCertificateInput{
+		CertificateArn: arn,
+		Tags:           []types.Tag{acmTag("env", "dev"), acmTag("team", "web"), {Key: aws.String("owner")}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	golden.New(t, golden.WithIgnoreFields("ResultMetadata")).Assert(t.Name(), listACMTags(t, client, arn))
+}
+
+// bodyRecorder is an HTTP client for the SDK that keeps the status and body
+// of the last response, so a test can check what kumo sent.
+type bodyRecorder struct {
+	status int
+	body   string
+}
+
+func (r *bodyRecorder) Do(req *http.Request) (*http.Response, error) {
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+
+	if err != nil {
+		return nil, err
+	}
+
+	r.status, r.body = resp.StatusCode, string(body)
+	resp.Body = io.NopCloser(bytes.NewReader(body))
+
+	return resp, nil
+}
+
+// TestACM_TagOperationResponseBodies records the responses of the tag
+// operations: ListTagsForCertificate leaves Tags out for a certificate
+// without tags, and AddTagsToCertificate and RemoveTagsFromCertificate
+// answer with an empty body, as the API reference documents for them.
+func TestACM_TagOperationResponseBodies(t *testing.T) {
+	recorder := &bodyRecorder{}
+	client := acm.NewFromConfig(awsConfig(t), func(o *acm.Options) {
+		o.BaseEndpoint = aws.String(testEndpoint())
+		o.HTTPClient = recorder
+	})
+	ctx := t.Context()
+
+	arn := requestACMCertificate(t, client, "tag-responses.example.com")
+
+	type response struct {
+		Operation  string
+		HTTPStatus int
+		Body       string
+	}
+
+	var responses []response
+
+	record := func(operation string) {
+		responses = append(responses, response{Operation: operation, HTTPStatus: recorder.status, Body: recorder.body})
+	}
+
+	listACMTags(t, client, arn)
+	record("ListTagsForCertificate without tags")
+
+	if _, err := client.AddTagsToCertificate(ctx, &acm.AddTagsToCertificateInput{
+		CertificateArn: arn,
+		Tags:           []types.Tag{acmTag("env", "dev"), {Key: aws.String("team")}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	record("AddTagsToCertificate")
+
+	if _, err := client.RemoveTagsFromCertificate(ctx, &acm.RemoveTagsFromCertificateInput{
+		CertificateArn: arn,
+		Tags:           []types.Tag{{Key: aws.String("team")}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	record("RemoveTagsFromCertificate")
+
+	golden.New(t).Assert(t.Name()+"_responses", responses)
+	golden.New(t, golden.WithIgnoreFields("ResultMetadata")).Assert(t.Name()+"_tags", listACMTags(t, client, arn))
+}
+
+// TestACM_ErrorResponses records the error of calls on a certificate that
+// does not exist or is not issued yet, and of calls whose CertificateArn or
+// Tags is empty.
+func TestACM_ErrorResponses(t *testing.T) {
+	client := newACMClient(t)
+	ctx := t.Context()
+
+	pending, err := client.RequestCertificate(ctx, &acm.RequestCertificateInput{
+		DomainName:       aws.String("pending-errors.example.com"),
+		ValidationMethod: types.ValidationMethodEmail,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	deleteACMCertificateOnCleanup(t, client, pending.CertificateArn)
+
+	absent := aws.String("arn:aws:acm:us-east-1:000000000000:certificate/non-existent")
+	tags := []types.Tag{{Key: aws.String("k")}}
+
+	calls := []struct {
+		name string
+		call func() error
+	}{
+		{"DescribeCertificate unknown ARN", func() error {
+			_, err := client.DescribeCertificate(ctx, &acm.DescribeCertificateInput{CertificateArn: absent})
+
+			return err
+		}},
+		{"GetCertificate unknown ARN", func() error {
+			_, err := client.GetCertificate(ctx, &acm.GetCertificateInput{CertificateArn: absent})
+
+			return err
+		}},
+		{"DeleteCertificate unknown ARN", func() error {
+			_, err := client.DeleteCertificate(ctx, &acm.DeleteCertificateInput{CertificateArn: absent})
+
+			return err
+		}},
+		{"GetCertificate pending certificate", func() error {
+			_, err := client.GetCertificate(ctx, &acm.GetCertificateInput{CertificateArn: pending.CertificateArn})
+
+			return err
+		}},
+		{"ListTagsForCertificate unknown ARN", func() error {
+			_, err := client.ListTagsForCertificate(ctx, &acm.ListTagsForCertificateInput{CertificateArn: absent})
+
+			return err
+		}},
+		{"AddTagsToCertificate unknown ARN", func() error {
+			_, err := client.AddTagsToCertificate(ctx, &acm.AddTagsToCertificateInput{CertificateArn: absent, Tags: tags})
+
+			return err
+		}},
+		{"RemoveTagsFromCertificate unknown ARN", func() error {
+			_, err := client.RemoveTagsFromCertificate(ctx, &acm.RemoveTagsFromCertificateInput{CertificateArn: absent, Tags: tags})
+
+			return err
+		}},
+		{"ListTagsForCertificate empty ARN", func() error {
+			_, err := client.ListTagsForCertificate(ctx, &acm.ListTagsForCertificateInput{CertificateArn: aws.String("")})
+
+			return err
+		}},
+		{"AddTagsToCertificate empty tags", func() error {
+			_, err := client.AddTagsToCertificate(ctx, &acm.AddTagsToCertificateInput{CertificateArn: absent, Tags: []types.Tag{}})
+
+			return err
+		}},
+		{"RemoveTagsFromCertificate empty tags", func() error {
+			_, err := client.RemoveTagsFromCertificate(ctx, &acm.RemoveTagsFromCertificateInput{CertificateArn: absent, Tags: []types.Tag{}})
+
+			return err
+		}},
+	}
+
+	type outcome struct {
+		Case  string
+		Error *acmError
+	}
+
+	outcomes := make([]outcome, 0, len(calls))
+
+	for _, c := range calls {
+		err := c.call()
+		if err == nil {
+			t.Fatalf("%s: expected an error", c.name)
+		}
+
+		outcomes = append(outcomes, outcome{Case: c.name, Error: acmErrorOf(t, err)})
+	}
 
 	golden.New(t).Assert(t.Name(), outcomes)
 }
