@@ -540,8 +540,15 @@ func (s *MemoryStorage) RemoveTagsFromCertificate(_ context.Context, arn string,
 		return certificateNotFound(arn)
 	}
 
+	// Validate every tag before removing any, so an invalid call changes
+	// nothing.
 	for _, tag := range tags {
-		if err := validateTagKey(tag.Key); err != nil {
+		var value string
+		if tag.Value != nil {
+			value = *tag.Value
+		}
+
+		if err := validateTag(tag.Key, value); err != nil {
 			return err
 		}
 	}
@@ -587,32 +594,26 @@ func mergeTags(existing, tags []Tag) ([]Tag, error) {
 
 // validateTags rejects tags that ACM refuses on any tagging call: more
 // entries than the Tags parameter takes (at most 50, the same as the
-// quota), values longer than the Tag type allows, or keys that
-// validateTagKey refuses.
+// quota), or a tag that validateTag refuses.
 func validateTags(tags []Tag) error {
 	if len(tags) > maxTagsPerCertificate {
 		return tooManyTagsError()
 	}
 
 	for _, tag := range tags {
-		if err := validateTagKey(tag.Key); err != nil {
+		if err := validateTag(tag.Key, tag.Value); err != nil {
 			return err
-		}
-
-		if utf8.RuneCountInString(tag.Value) > maxTagValueLength {
-			return &Error{
-				Code:    errInvalidParameter,
-				Message: fmt.Sprintf("tag value for key %q must be at most %d characters long", tag.Key, maxTagValueLength),
-			}
 		}
 	}
 
 	return nil
 }
 
-// validateTagKey rejects a tag key outside the Tag type's length limits or
-// with the prefix reserved for AWS.
-func validateTagKey(key string) error {
+// validateTag rejects a tag whose key or value is outside the Tag type's
+// length limits, or whose key has the prefix reserved for AWS. Every
+// tagging operation, RemoveTagsFromCertificate included, takes tags of
+// this type.
+func validateTag(key, value string) error {
 	if n := utf8.RuneCountInString(key); n == 0 || n > maxTagKeyLength {
 		return &Error{
 			Code:    errInvalidParameter,
@@ -622,6 +623,13 @@ func validateTagKey(key string) error {
 
 	if strings.HasPrefix(key, reservedTagPrefix) {
 		return reservedTagError(key)
+	}
+
+	if utf8.RuneCountInString(value) > maxTagValueLength {
+		return &Error{
+			Code:    errInvalidParameter,
+			Message: fmt.Sprintf("tag value for key %q must be at most %d characters long", key, maxTagValueLength),
+		}
 	}
 
 	return nil

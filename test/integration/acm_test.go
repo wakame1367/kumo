@@ -834,6 +834,33 @@ func TestACM_RemoveTagsMatchesValue(t *testing.T) {
 	golden.New(t, golden.WithIgnoreFields("ResultMetadata")).Assert(t.Name(), listACMTags(t, client, arn))
 }
 
+// TestACM_RemoveTagsRejectsInvalidValue removes two tags in one call, one of
+// them given with a value longer than the Tag type allows. The call fails,
+// and neither tag is removed.
+func TestACM_RemoveTagsRejectsInvalidValue(t *testing.T) {
+	client := newACMClient(t)
+
+	arn := requestACMCertificate(t, client, "remove-invalid-value.example.com",
+		acmTag("env", "prod"), acmTag("team", "web"))
+
+	_, err := client.RemoveTagsFromCertificate(t.Context(), &acm.RemoveTagsFromCertificateInput{
+		CertificateArn: arn,
+		Tags:           []types.Tag{{Key: aws.String("env")}, acmTag("team", strings.Repeat("v", 257))},
+	})
+
+	type outcome struct {
+		Error *acmError
+		Tags  []types.Tag
+	}
+
+	got := outcome{Tags: listACMTags(t, client, arn).Tags}
+	if err != nil {
+		got.Error = acmErrorOf(t, err)
+	}
+
+	golden.New(t).Assert(t.Name(), got)
+}
+
 // bodyRecorder is an HTTP client for the SDK that keeps the status and body
 // of the last response, so a test can check what kumo sent.
 type bodyRecorder struct {
