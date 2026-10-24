@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -31,6 +32,16 @@ const (
 // maxTagsPerCertificate is the ACM quota on tags per certificate.
 // https://docs.aws.amazon.com/acm/latest/userguide/tags-restrictions.html
 const maxTagsPerCertificate = 50
+
+// Length limits, in characters, of a tag key and value. The API reference's
+// Tag data type allows keys of 1 to 128 characters and values of up to 256;
+// the user guide's tag restrictions give 127 and 255, and kumo uses the
+// API reference's limits so it never rejects a tag the API reference allows.
+// https://docs.aws.amazon.com/acm/latest/APIReference/API_Tag.html
+const (
+	maxTagKeyLength   = 128
+	maxTagValueLength = 256
+)
 
 // reservedTagPrefix marks tag keys reserved for AWS use, which callers cannot
 // add, edit or delete.
@@ -260,11 +271,10 @@ func (s *MemoryStorage) RequestCertificate(_ context.Context, req *RequestCertif
 		return nil, err
 	}
 
-	if err := validateTags(req.Tags); err != nil {
+	tags, err := mergeTags(nil, req.Tags)
+	if err != nil {
 		return nil, err
 	}
-
-	arn := s.newCertificateARN()
 
 	serialBytes := make([]byte, 16)
 	if _, err := rand.Read(serialBytes); err != nil {
@@ -280,7 +290,7 @@ func (s *MemoryStorage) RequestCertificate(_ context.Context, req *RequestCertif
 	status, issuedAt := initialStatus(validationMethod, now)
 
 	cert := &Certificate{
-		CertificateArn:          arn,
+		CertificateArn:          s.newCertificateARN(),
 		DomainName:              req.DomainName,
 		SubjectAlternativeNames: req.SubjectAlternativeNames,
 		Status:                  status,
@@ -293,7 +303,7 @@ func (s *MemoryStorage) RequestCertificate(_ context.Context, req *RequestCertif
 		DomainValidationOptions: buildDomainValidations(req, validationMethod),
 		RenewalEligibility:      renewalIneligible,
 		Options:                 req.Options,
-		Tags:                    slices.Clone(req.Tags),
+		Tags:                    tags,
 	}
 
 	if err := s.issue(cert, now); err != nil {
@@ -303,7 +313,7 @@ func (s *MemoryStorage) RequestCertificate(_ context.Context, req *RequestCertif
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.Certificates[arn] = cert
+	s.Certificates[cert.CertificateArn] = cert
 
 	s.saveLocked()
 
@@ -436,7 +446,8 @@ func (s *MemoryStorage) ImportCertificate(_ context.Context, req *ImportCertific
 		}
 	}
 
-	if err := validateTags(req.Tags); err != nil {
+	tags, err := mergeTags(nil, req.Tags)
+	if err != nil {
 		return nil, err
 	}
 
@@ -450,7 +461,6 @@ func (s *MemoryStorage) ImportCertificate(_ context.Context, req *ImportCertific
 		return nil, fmt.Errorf("failed to generate serial: %w", err)
 	}
 
-	serial := hex.EncodeToString(serialBytes)
 	now := time.Now()
 
 	// Parse certificate to extract domain (simplified - just use a placeholder).
@@ -462,7 +472,7 @@ func (s *MemoryStorage) ImportCertificate(_ context.Context, req *ImportCertific
 		Status:             statusIssued,
 		Type:               certificateTypeImported,
 		KeyAlgorithm:       keyAlgorithmRSA2048,
-		Serial:             serial,
+		Serial:             hex.EncodeToString(serialBytes),
 		Subject:            fmt.Sprintf("CN=%s", domainName),
 		CreatedAt:          now,
 		ImportedAt:         &now,
@@ -472,7 +482,7 @@ func (s *MemoryStorage) ImportCertificate(_ context.Context, req *ImportCertific
 		PrivateKey:         string(req.PrivateKey),
 		RenewalEligibility: renewalIneligible,
 		InUseBy:            []string{},
-		Tags:               slices.Clone(req.Tags),
+		Tags:               tags,
 	}
 
 	s.Certificates[arn] = cert
@@ -506,23 +516,9 @@ func (s *MemoryStorage) AddTagsToCertificate(_ context.Context, arn string, tags
 		return certificateNotFound(arn)
 	}
 
-	if err := validateTags(tags); err != nil {
+	merged, err := mergeTags(cert.Tags, tags)
+	if err != nil {
 		return err
-	}
-
-	merged := slices.Clone(cert.Tags)
-
-	for _, tag := range tags {
-		idx := slices.IndexFunc(merged, func(t Tag) bool { return t.Key == tag.Key })
-		if idx >= 0 {
-			merged[idx].Value = tag.Value
-		} else {
-			merged = append(merged, tag)
-		}
-	}
-
-	if len(merged) > maxTagsPerCertificate {
-		return tooManyTagsError()
 	}
 
 	cert.Tags = merged
@@ -545,8 +541,8 @@ func (s *MemoryStorage) RemoveTagsFromCertificate(_ context.Context, arn string,
 	}
 
 	for _, tag := range tags {
-		if strings.HasPrefix(tag.Key, reservedTagPrefix) {
-			return reservedTagError(tag.Key)
+		if err := validateTagKey(tag.Key); err != nil {
+			return err
 		}
 	}
 
@@ -561,17 +557,71 @@ func (s *MemoryStorage) RemoveTagsFromCertificate(_ context.Context, arn string,
 	return nil
 }
 
-// validateTags rejects tag sets that ACM refuses on any tagging call: more
-// tags than a certificate may carry, or keys with the reserved prefix.
+// mergeTags returns existing with tags applied in order, the way every
+// tagging call stores tags: a key that is already present, in existing or
+// earlier in tags, takes the new value, and any other key is appended. It
+// rejects tags that validateTags refuses and a result with more tags than a
+// certificate may carry, so a key given twice counts once.
+func mergeTags(existing, tags []Tag) ([]Tag, error) {
+	if err := validateTags(tags); err != nil {
+		return nil, err
+	}
+
+	merged := slices.Clone(existing)
+
+	for _, tag := range tags {
+		idx := slices.IndexFunc(merged, func(t Tag) bool { return t.Key == tag.Key })
+		if idx >= 0 {
+			merged[idx].Value = tag.Value
+		} else {
+			merged = append(merged, tag)
+		}
+	}
+
+	if len(merged) > maxTagsPerCertificate {
+		return nil, tooManyTagsError()
+	}
+
+	return merged, nil
+}
+
+// validateTags rejects tags that ACM refuses on any tagging call: more
+// entries than the Tags parameter takes (at most 50, the same as the
+// quota), values longer than the Tag type allows, or keys that
+// validateTagKey refuses.
 func validateTags(tags []Tag) error {
 	if len(tags) > maxTagsPerCertificate {
 		return tooManyTagsError()
 	}
 
 	for _, tag := range tags {
-		if strings.HasPrefix(tag.Key, reservedTagPrefix) {
-			return reservedTagError(tag.Key)
+		if err := validateTagKey(tag.Key); err != nil {
+			return err
 		}
+
+		if utf8.RuneCountInString(tag.Value) > maxTagValueLength {
+			return &Error{
+				Code:    errInvalidParameter,
+				Message: fmt.Sprintf("tag value for key %q must be at most %d characters long", tag.Key, maxTagValueLength),
+			}
+		}
+	}
+
+	return nil
+}
+
+// validateTagKey rejects a tag key outside the Tag type's length limits or
+// with the prefix reserved for AWS.
+func validateTagKey(key string) error {
+	if n := utf8.RuneCountInString(key); n == 0 || n > maxTagKeyLength {
+		return &Error{
+			Code:    errInvalidParameter,
+			Message: fmt.Sprintf("tag key %q must be 1 to %d characters long", key, maxTagKeyLength),
+		}
+	}
+
+	if strings.HasPrefix(key, reservedTagPrefix) {
+		return reservedTagError(key)
 	}
 
 	return nil

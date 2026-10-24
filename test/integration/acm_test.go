@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -584,6 +585,229 @@ func TestACM_CertificateTags(t *testing.T) {
 	}
 
 	golden.New(t, golden.WithIgnoreFields("ResultMetadata")).Assert(t.Name()+"_updated", listOutput)
+}
+
+// Placeholder PEM material for ImportCertificate; kumo does not parse it.
+const (
+	dummyCertificatePEM = "-----BEGIN CERTIFICATE-----\nMIICert...\n-----END CERTIFICATE-----"
+	dummyPrivateKeyPEM  = "-----BEGIN PRIVATE KEY-----\nMIIPrivateKey...\n-----END PRIVATE KEY-----"
+)
+
+// acmTag returns an ACM tag with a key and a value.
+func acmTag(key, value string) types.Tag {
+	return types.Tag{Key: aws.String(key), Value: aws.String(value)}
+}
+
+// deleteACMCertificateOnCleanup deletes the certificate when the test ends.
+func deleteACMCertificateOnCleanup(t *testing.T, client *acm.Client, arn *string) {
+	t.Helper()
+
+	t.Cleanup(func() {
+		_, _ = client.DeleteCertificate(context.Background(), &acm.DeleteCertificateInput{CertificateArn: arn})
+	})
+}
+
+// requestACMCertificate requests a certificate for domain with tags and
+// deletes it when the test ends.
+func requestACMCertificate(t *testing.T, client *acm.Client, domain string, tags ...types.Tag) *string {
+	t.Helper()
+
+	requested, err := client.RequestCertificate(t.Context(), &acm.RequestCertificateInput{
+		DomainName: aws.String(domain),
+		Tags:       tags,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	deleteACMCertificateOnCleanup(t, client, requested.CertificateArn)
+
+	return requested.CertificateArn
+}
+
+// listACMTags returns the tags of a certificate.
+func listACMTags(t *testing.T, client *acm.Client, arn *string) *acm.ListTagsForCertificateOutput {
+	t.Helper()
+
+	listed, err := client.ListTagsForCertificate(t.Context(), &acm.ListTagsForCertificateInput{CertificateArn: arn})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return listed
+}
+
+// TestACM_DuplicateTagKeys tags certificates with a key given twice in one
+// call. Every tagging operation stores the key once, with the last value,
+// the way AddTagsToCertificate overwrites a key that is already present.
+func TestACM_DuplicateTagKeys(t *testing.T) {
+	client := newACMClient(t)
+	ctx := t.Context()
+	ignore := golden.WithIgnoreFields("ResultMetadata")
+
+	duplicated := []types.Tag{acmTag("env", "dev"), acmTag("team", "web"), acmTag("env", "prod")}
+
+	requested := requestACMCertificate(t, client, "duplicate-tags.example.com", duplicated...)
+
+	golden.New(t, ignore).Assert(t.Name()+"_requested", listACMTags(t, client, requested))
+
+	imported, err := client.ImportCertificate(ctx, &acm.ImportCertificateInput{
+		Certificate: []byte(dummyCertificatePEM),
+		PrivateKey:  []byte(dummyPrivateKeyPEM),
+		Tags:        duplicated,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	deleteACMCertificateOnCleanup(t, client, imported.CertificateArn)
+
+	golden.New(t, ignore).Assert(t.Name()+"_imported", listACMTags(t, client, imported.CertificateArn))
+
+	if _, err := client.AddTagsToCertificate(ctx, &acm.AddTagsToCertificateInput{
+		CertificateArn: requested,
+		Tags:           []types.Tag{acmTag("owner", "alice"), acmTag("owner", "bob")},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	golden.New(t, ignore).Assert(t.Name()+"_added", listACMTags(t, client, requested))
+}
+
+// TestACM_TagQuotaCountsDistinctKeys requests a certificate with 50 tags
+// that hold 49 distinct keys, then adds keys up to the quota of 50 tags per
+// certificate, which counts distinct keys.
+func TestACM_TagQuotaCountsDistinctKeys(t *testing.T) {
+	client := newACMClient(t)
+	ctx := t.Context()
+
+	tags := make([]types.Tag, 0, 50)
+	for i := range 49 {
+		tags = append(tags, acmTag(fmt.Sprintf("key-%02d", i), "v"))
+	}
+
+	tags = append(tags, acmTag("key-00", "again"))
+
+	arn := requestACMCertificate(t, client, "tag-quota.example.com", tags...)
+
+	type step struct {
+		Step  string
+		Error *acmError `json:",omitempty"`
+		Tags  int
+	}
+
+	var steps []step
+
+	record := func(name string, err error) {
+		s := step{Step: name, Tags: len(listACMTags(t, client, arn).Tags)}
+		if err != nil {
+			s.Error = acmErrorOf(t, err)
+		}
+
+		steps = append(steps, s)
+	}
+
+	addTag := func(key, value string) error {
+		_, err := client.AddTagsToCertificate(ctx, &acm.AddTagsToCertificateInput{
+			CertificateArn: arn,
+			Tags:           []types.Tag{acmTag(key, value)},
+		})
+
+		return err
+	}
+
+	record("request 50 tags with 49 keys", nil)
+	record("add a 50th key", addTag("key-49", "v"))
+	record("add a 51st key", addTag("key-50", "v"))
+	record("overwrite a key at the quota", addTag("key-00", "overwritten"))
+
+	golden.New(t).Assert(t.Name(), steps)
+}
+
+// TestACM_InvalidTags sends every tagging operation tags that break the Tag
+// type's length limits or use the reserved aws: prefix, and records the
+// error of each call; a key and a value at the length limits are accepted.
+func TestACM_InvalidTags(t *testing.T) {
+	client := newACMClient(t)
+	ctx := t.Context()
+
+	arn := requestACMCertificate(t, client, "invalid-tags.example.com")
+
+	request := func(tags ...types.Tag) error {
+		requested, err := client.RequestCertificate(ctx, &acm.RequestCertificateInput{
+			DomainName: aws.String("invalid-tags.example.com"),
+			Tags:       tags,
+		})
+		if err == nil {
+			deleteACMCertificateOnCleanup(t, client, requested.CertificateArn)
+		}
+
+		return err
+	}
+
+	importWith := func(tags ...types.Tag) error {
+		imported, err := client.ImportCertificate(ctx, &acm.ImportCertificateInput{
+			Certificate: []byte(dummyCertificatePEM),
+			PrivateKey:  []byte(dummyPrivateKeyPEM),
+			Tags:        tags,
+		})
+		if err == nil {
+			deleteACMCertificateOnCleanup(t, client, imported.CertificateArn)
+		}
+
+		return err
+	}
+
+	add := func(tags ...types.Tag) error {
+		_, err := client.AddTagsToCertificate(ctx, &acm.AddTagsToCertificateInput{CertificateArn: arn, Tags: tags})
+
+		return err
+	}
+
+	remove := func(tags ...types.Tag) error {
+		_, err := client.RemoveTagsFromCertificate(ctx, &acm.RemoveTagsFromCertificateInput{CertificateArn: arn, Tags: tags})
+
+		return err
+	}
+
+	emptyKey := acmTag("", "v")
+	reservedKey := acmTag("aws:reserved", "v")
+
+	tooMany := make([]types.Tag, 0, 51)
+	for i := range 51 {
+		tooMany = append(tooMany, acmTag(fmt.Sprintf("key-%02d", i), "v"))
+	}
+
+	type outcome struct {
+		Case  string
+		Error *acmError `json:",omitempty"`
+	}
+
+	var outcomes []outcome
+
+	record := func(name string, err error) {
+		o := outcome{Case: name}
+		if err != nil {
+			o.Error = acmErrorOf(t, err)
+		}
+
+		outcomes = append(outcomes, o)
+	}
+
+	record("RequestCertificate empty key", request(emptyKey))
+	record("ImportCertificate empty key", importWith(emptyKey))
+	record("AddTagsToCertificate empty key", add(emptyKey))
+	record("RemoveTagsFromCertificate empty key", remove(types.Tag{Key: aws.String("")}))
+	record("AddTagsToCertificate 129 character key", add(acmTag(strings.Repeat("k", 129), "v")))
+	record("AddTagsToCertificate 257 character value", add(acmTag("long-value", strings.Repeat("v", 257))))
+	record("AddTagsToCertificate 128 character key and 256 character value", add(acmTag(strings.Repeat("k", 128), strings.Repeat("v", 256))))
+	record("RequestCertificate reserved key", request(reservedKey))
+	record("ImportCertificate reserved key", importWith(reservedKey))
+	record("AddTagsToCertificate reserved key", add(reservedKey))
+	record("RemoveTagsFromCertificate reserved key", remove(types.Tag{Key: aws.String("aws:reserved")}))
+	record("RequestCertificate 51 tags", request(tooMany...))
+
+	golden.New(t).Assert(t.Name(), outcomes)
 }
 
 func TestACM_ListTagsForNonExistentCertificate(t *testing.T) {
