@@ -578,6 +578,42 @@ func TestRoute53_RecordNameWithoutTrailingDot(t *testing.T) {
 	assertZoneGolden(t, t.Name()+"_delete", zoneName, listRecordSets(t, client, zoneID))
 }
 
+func TestRoute53_RecordNameIsCaseInsensitive(t *testing.T) {
+	t.Parallel()
+
+	client := newRoute53Client(t)
+	ctx := t.Context()
+	zoneID, zoneName := createRecordTestZone(t, client, "case-test")
+	upperZoneName := strings.ToUpper(zoneName)
+
+	// Create in upper case; the record set is listed in lower case.
+	if err := changeRecordSets(ctx, client, zoneID, aRecordChange(types.ChangeActionCreate, "WWW."+upperZoneName, 300, "192.0.2.1")); err != nil {
+		t.Fatal(err)
+	}
+
+	assertZoneGolden(t, t.Name()+"_create", zoneName, listRecordSets(t, client, zoneID))
+
+	// Creating the same name in lower case is a duplicate.
+	var apiErr smithy.APIError
+	if err := changeRecordSets(ctx, client, zoneID, aRecordChange(types.ChangeActionCreate, "www."+zoneName+".", 300, "192.0.2.1")); !errors.As(err, &apiErr) {
+		t.Fatalf("expected an API error for duplicate record, got %T: %v", err, err)
+	}
+
+	// UPSERT in mixed case updates the same record set.
+	if err := changeRecordSets(ctx, client, zoneID, aRecordChange(types.ChangeActionUpsert, "Www."+zoneName, 600, "192.0.2.2")); err != nil {
+		t.Fatal(err)
+	}
+
+	assertZoneGolden(t, t.Name()+"_upsert", zoneName, listRecordSets(t, client, zoneID))
+
+	// DELETE in yet another case removes it.
+	if err := changeRecordSets(ctx, client, zoneID, aRecordChange(types.ChangeActionDelete, "wWw."+upperZoneName+".", 600, "192.0.2.2")); err != nil {
+		t.Fatal(err)
+	}
+
+	assertZoneGolden(t, t.Name()+"_delete", zoneName, listRecordSets(t, client, zoneID))
+}
+
 func TestRoute53_ListHostedZones_Pagination(t *testing.T) {
 	// Not parallel: pagination assertions require a stable view of the
 	// hosted zones list, which other parallel tests mutate.

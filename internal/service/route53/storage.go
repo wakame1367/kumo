@@ -125,10 +125,11 @@ func (s *MemoryStorage) UnmarshalJSON(data []byte) error {
 	}
 
 	// Snapshots written before record names were normalized may hold names
-	// without the trailing dot, possibly for both spellings of one record.
+	// as sent, without the trailing dot or with upper-case letters, possibly
+	// for more than one spelling of a record.
 	for zoneID, records := range s.RecordSets {
 		for i := range records {
-			records[i].Name = fullyQualified(records[i].Name)
+			records[i].Name = normalizeDNSName(records[i].Name)
 		}
 
 		records = coalesceRecordSets(zoneID, records)
@@ -309,9 +310,10 @@ func (s *MemoryStorage) ChangeRecordSets(hostedZoneID string, changes []Change) 
 
 	for i := range changes {
 		// Route 53 treats a record name with and without the trailing dot as
-		// identical and returns it fully qualified.
+		// identical and returns it fully qualified, and stores letters in
+		// lower case however they are sent.
 		rrset := changes[i].ResourceRecordSet
-		rrset.Name = fullyQualified(rrset.Name)
+		rrset.Name = normalizeDNSName(rrset.Name)
 
 		switch changes[i].Action {
 		case "CREATE":
@@ -374,15 +376,6 @@ func (s *MemoryStorage) GetChange(id string) (*ChangeInfo, error) {
 	}
 
 	return c, nil
-}
-
-// fullyQualified returns name with a trailing dot.
-func fullyQualified(name string) string {
-	if strings.HasSuffix(name, ".") {
-		return name
-	}
-
-	return name + "."
 }
 
 // findRecordIndex finds the index of a record set by name and type.

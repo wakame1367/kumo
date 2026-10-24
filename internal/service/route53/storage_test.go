@@ -74,6 +74,18 @@ var recordNameNormalizationTests = []struct {
 		change:     Change{Action: testActionUpsert, ResourceRecordSet: newTestRecordSet("www.example.com", "192.0.2.2")},
 		want:       []string{testUpdatedRecord},
 	},
+	{
+		name:       "delete in another case",
+		createName: "WWW.Example.com",
+		change:     Change{Action: testActionDelete, ResourceRecordSet: newTestRecordSet("www.example.com.", "192.0.2.1")},
+		want:       []string{},
+	},
+	{
+		name:       "upsert in another case",
+		createName: "www.Example.COM.",
+		change:     Change{Action: testActionUpsert, ResourceRecordSet: newTestRecordSet("WWW.EXAMPLE.COM", "192.0.2.2")},
+		want:       []string{testUpdatedRecord},
+	},
 }
 
 func TestChangeRecordSetsNormalizesRecordNames(t *testing.T) {
@@ -164,6 +176,21 @@ var loadNormalizationTests = []struct {
 		},
 		wantLoaded:      []string{"api.example.com. 192.0.2.10", "www.example.com. 192.0.2.9"},
 		wantAfterDelete: []string{"api.example.com. 192.0.2.10"},
+	},
+	{
+		name:            "upper-case name",
+		persisted:       []ResourceRecordSet{newTestRecordSet("WWW.EXAMPLE.COM.", "192.0.2.1")},
+		wantLoaded:      []string{testCreatedRecord},
+		wantAfterDelete: []string{},
+	},
+	{
+		name: "spellings that differ in case keep the later one",
+		persisted: []ResourceRecordSet{
+			newTestRecordSet("WWW.Example.com", "192.0.2.1"),
+			newTestRecordSet("www.example.com.", "192.0.2.9"),
+		},
+		wantLoaded:      []string{"www.example.com. 192.0.2.9"},
+		wantAfterDelete: []string{},
 	},
 }
 
