@@ -4,6 +4,7 @@ package integration
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -449,80 +450,132 @@ func TestRoute53_UpsertResourceRecordSet(t *testing.T) {
 	}
 }
 
+// zonePlaceholder stands in for a per-run hosted zone name in golden files.
+const zonePlaceholder = "{zone}"
+
+// route53GoldenIgnores hides the per-run identifiers of a hosted zone.
+var route53GoldenIgnores = golden.WithIgnoreFields("Id", "CallerReference", "NameServers", "ResultMetadata")
+
+// createRecordTestZone creates a hosted zone whose name is unique to this
+// run, so a rerun against a persisted server never meets a leftover zone, and
+// returns its ID and name. On cleanup it deletes the record sets the test
+// left behind and the zone.
+func createRecordTestZone(t *testing.T, client *route53.Client, prefix string) (zoneID, zoneName string) {
+	t.Helper()
+
+	label := uniqueName(prefix)
+	zoneName = label + ".example.com"
+
+	created, err := client.CreateHostedZone(t.Context(), &route53.CreateHostedZoneInput{
+		Name:            aws.String(zoneName),
+		CallerReference: aws.String(label),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	zoneID = aws.ToString(created.HostedZone.Id)
+
+	t.Cleanup(func() {
+		ctx := context.Background()
+
+		listed, err := client.ListResourceRecordSets(ctx, &route53.ListResourceRecordSetsInput{HostedZoneId: aws.String(zoneID)})
+		if err == nil {
+			for i := range listed.ResourceRecordSets {
+				_ = changeRecordSets(ctx, client, zoneID, types.Change{
+					Action:            types.ChangeActionDelete,
+					ResourceRecordSet: &listed.ResourceRecordSets[i],
+				})
+			}
+		}
+
+		_, _ = client.DeleteHostedZone(ctx, &route53.DeleteHostedZoneInput{Id: aws.String(zoneID)})
+	})
+
+	return zoneID, zoneName
+}
+
+// changeRecordSets sends the changes to the zone as one change batch.
+func changeRecordSets(ctx context.Context, client *route53.Client, zoneID string, changes ...types.Change) error {
+	_, err := client.ChangeResourceRecordSets(ctx, &route53.ChangeResourceRecordSetsInput{
+		HostedZoneId: aws.String(zoneID),
+		ChangeBatch:  &types.ChangeBatch{Changes: changes},
+	})
+
+	return err
+}
+
+// aRecordChange returns a change of an A record set with the given TTL and
+// values.
+func aRecordChange(action types.ChangeAction, name string, ttl int64, values ...string) types.Change {
+	records := make([]types.ResourceRecord, 0, len(values))
+	for _, value := range values {
+		records = append(records, types.ResourceRecord{Value: aws.String(value)})
+	}
+
+	return types.Change{
+		Action: action,
+		ResourceRecordSet: &types.ResourceRecordSet{
+			Name:            aws.String(name),
+			Type:            types.RRTypeA,
+			TTL:             aws.Int64(ttl),
+			ResourceRecords: records,
+		},
+	}
+}
+
+// listRecordSets lists the record sets of the zone.
+func listRecordSets(t *testing.T, client *route53.Client, zoneID string) *route53.ListResourceRecordSetsOutput {
+	t.Helper()
+
+	listed, err := client.ListResourceRecordSets(t.Context(), &route53.ListResourceRecordSetsInput{HostedZoneId: aws.String(zoneID)})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return listed
+}
+
+// assertZoneGolden golden-asserts v with the per-run zone name replaced by
+// zonePlaceholder, so the golden file still pins record names.
+func assertZoneGolden(t *testing.T, name, zoneName string, v any) {
+	t.Helper()
+
+	data, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	golden.New(t, route53GoldenIgnores).Assert(name, strings.ReplaceAll(string(data), zoneName, zonePlaceholder))
+}
+
 func TestRoute53_RecordNameWithoutTrailingDot(t *testing.T) {
 	t.Parallel()
 
 	client := newRoute53Client(t)
 	ctx := t.Context()
+	zoneID, zoneName := createRecordTestZone(t, client, "fqdn-test")
 
-	createResult, err := client.CreateHostedZone(ctx, &route53.CreateHostedZoneInput{
-		Name:            aws.String("fqdn-test.example.com"),
-		CallerReference: aws.String(fmt.Sprintf("test-fqdn-record-name-%d", time.Now().UnixNano())),
-	})
-	if err != nil {
+	// Create without the trailing dot; the record set is listed fully
+	// qualified.
+	if err := changeRecordSets(ctx, client, zoneID, aRecordChange(types.ChangeActionCreate, "www."+zoneName, 300, "192.0.2.1")); err != nil {
 		t.Fatal(err)
 	}
 
-	t.Cleanup(func() {
-		_, _ = client.DeleteHostedZone(context.Background(), &route53.DeleteHostedZoneInput{
-			Id: createResult.HostedZone.Id,
-		})
-	})
-
-	change := func(action types.ChangeAction, name string) error {
-		_, err := client.ChangeResourceRecordSets(ctx, &route53.ChangeResourceRecordSetsInput{
-			HostedZoneId: createResult.HostedZone.Id,
-			ChangeBatch: &types.ChangeBatch{
-				Changes: []types.Change{
-					{
-						Action: action,
-						ResourceRecordSet: &types.ResourceRecordSet{
-							Name: aws.String(name),
-							Type: types.RRTypeA,
-							TTL:  aws.Int64(300),
-							ResourceRecords: []types.ResourceRecord{
-								{Value: aws.String("192.0.2.1")},
-							},
-						},
-					},
-				},
-			},
-		})
-
-		return err
-	}
-
-	// Create without the trailing dot.
-	if err := change(types.ChangeActionCreate, "www.fqdn-test.example.com"); err != nil {
-		t.Fatal(err)
-	}
-
-	listResult, err := client.ListResourceRecordSets(ctx, &route53.ListResourceRecordSetsInput{
-		HostedZoneId: createResult.HostedZone.Id,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	names := make([]string, 0, len(listResult.ResourceRecordSets))
-	for _, record := range listResult.ResourceRecordSets {
-		names = append(names, aws.ToString(record.Name))
-	}
-
-	if len(names) != 1 || names[0] != "www.fqdn-test.example.com." {
-		t.Fatalf("expected one record named www.fqdn-test.example.com., got %q", names)
-	}
+	assertZoneGolden(t, t.Name()+"_create", zoneName, listRecordSets(t, client, zoneID))
 
 	// Creating the same name with the trailing dot is a duplicate.
 	var apiErr smithy.APIError
-	if err := change(types.ChangeActionCreate, "www.fqdn-test.example.com."); !errors.As(err, &apiErr) {
+	if err := changeRecordSets(ctx, client, zoneID, aRecordChange(types.ChangeActionCreate, "www."+zoneName+".", 300, "192.0.2.1")); !errors.As(err, &apiErr) {
 		t.Fatalf("expected an API error for duplicate record, got %T: %v", err, err)
 	}
 
 	// Delete with the trailing dot.
-	if err := change(types.ChangeActionDelete, "www.fqdn-test.example.com."); err != nil {
+	if err := changeRecordSets(ctx, client, zoneID, aRecordChange(types.ChangeActionDelete, "www."+zoneName+".", 300, "192.0.2.1")); err != nil {
 		t.Fatal(err)
 	}
+
+	assertZoneGolden(t, t.Name()+"_delete", zoneName, listRecordSets(t, client, zoneID))
 }
 
 func TestRoute53_ListHostedZones_Pagination(t *testing.T) {
