@@ -381,20 +381,20 @@ func (s *MemoryStorage) ChangeRecordSets(hostedZoneID string, changes []Change) 
 		rrset.Name = normalizeDNSName(rrset.Name)
 
 		switch changes[i].Action {
-		case "CREATE":
+		case changeActionCreate:
 			if s.findRecordIndex(records, rrset.Name, rrset.Type, rrset.SetIdentifier) >= 0 {
 				return ErrRecordSetAlreadyExists
 			}
 
 			records = append(records, rrset)
-		case "DELETE":
+		case changeActionDelete:
 			idx := s.findRecordIndex(records, rrset.Name, rrset.Type, rrset.SetIdentifier)
 			if idx < 0 {
 				return ErrRecordSetNotFound
 			}
 
 			records = append(records[:idx], records[idx+1:]...)
-		case "UPSERT":
+		case changeActionUpsert:
 			idx := s.findRecordIndex(records, rrset.Name, rrset.Type, rrset.SetIdentifier)
 			if idx >= 0 {
 				records[idx] = rrset
@@ -477,7 +477,7 @@ func checkRoutingPolicies(records []ResourceRecordSet, changes []Change) error {
 	written := make(map[group]bool, len(changes))
 
 	for i := range changes {
-		if changes[i].Action == "CREATE" || changes[i].Action == "UPSERT" {
+		if changes[i].Action == changeActionCreate || changes[i].Action == changeActionUpsert {
 			rrset := &changes[i].ResourceRecordSet
 			written[group{normalizeDNSName(rrset.Name), rrset.Type}] = true
 		}
